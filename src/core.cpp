@@ -25,8 +25,8 @@ std::size_t allocation_bytes(Size elements, Size element_bytes) {
 }
 void Config::validate() const {
   if (qubits == 0 || qubits >= 64) throw std::invalid_argument("qubits must be in [1,63]");
-  if (positions.empty() || positions.size() > 8 || positions.size() > qubits)
-    throw std::invalid_argument("measurement count must be in [1,min(8,q)]");
+  if (positions.empty() || positions.size() > max_measurement_qubits || positions.size() > qubits)
+    throw std::invalid_argument("measurement count must be in [1,min(16,q)]");
   Size seen = 0;
   for (unsigned p : positions) {
     if (p >= qubits) throw std::invalid_argument("position outside state index");
@@ -82,7 +82,8 @@ Config parse_config(int argc, const char* const* argv) {
   return c;
 }
 std::vector<unsigned> contiguous_positions(unsigned q, unsigned k, const std::string& band) {
-  if (!q || q >= 64 || !k || k > 8 || k > q) throw std::invalid_argument("invalid q or k");
+  if (!q || q >= 64 || !k || k > max_measurement_qubits || k > q)
+    throw std::invalid_argument("invalid q or k");
   unsigned start;
   if (band == "low") start = 0;
   else if (band == "middle") start = (q-k)/2;
@@ -104,7 +105,8 @@ Size workspace_elements(Size blocks, Size threads, Size bins) {
   return checked_mul(checked_mul(blocks, threads), bins);
 }
 Size bin_for(Size index, const std::vector<unsigned>& positions) {
-  if (positions.empty() || positions.size() > 8) throw std::invalid_argument("invalid position count");
+  if (positions.empty() || positions.size() > max_measurement_qubits)
+    throw std::invalid_argument("invalid position count");
   Size bin = 0, seen = 0;
   for (std::size_t t = 0; t < positions.size(); ++t) {
     unsigned p = positions[t];

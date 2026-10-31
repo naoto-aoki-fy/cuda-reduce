@@ -55,12 +55,16 @@ those overrides. `--block-sizes` accepts a distinct comma-separated selection
 from 128,256,512; it defaults to `--block-size` (256). Measured repetitions
 default to 1 and warmups to 3.
 
-Each of 24 measurement configurations (k=1..8 times three position bands) has,
+Each of 48 measurement configurations (k=1..16 times three position bands) has,
 for each block size and multiplier, 20 rows: custom/CUB BlockReduce times two
 strategies times five storage/layout choices (registers with layout n/a, shared
 with two layouts, global with two layouts). Add one DeviceSegmentedReduce row
 per measurement configuration, independent of custom tuning. The default full
-matrix therefore contains **2424 rows**; three block sizes produce **7224**.
+matrix therefore contains **4848 rows**; three block sizes produce **14448**.
+Here k counts measured qubits, while the state size stays fixed at q=31.
+The smoke preset retains its k=1..min(8,q) sweep. Larger k can exceed shared
+memory or global workspace limits; these requests remain explicit unsupported
+rows, as do register requests beyond the existing eight-bin capacity (k>3).
 Even coincident position bands on a small smoke input retain separate labels.
 Unsupported requests remain rows with explicit diagnostics. Segmented custom
 fields and register layout are JSON null (not applicable).

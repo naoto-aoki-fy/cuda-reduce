@@ -12,7 +12,7 @@ using LogicalOffset = std::int64_t;
 static_assert(sizeof(LogicalOffset) == 8, "64-bit signed iterator arithmetic required");
 // Small by-value descriptor; no N-element mapping or norm buffer.
 struct GatherMap {
-  unsigned qubits = 0, k = 0, positions[8]{};
+  unsigned qubits = 0, k = 0, positions[max_measurement_qubits]{};
   Size length = 0, measured_mask = 0;
   GatherMap() = default;
   explicit GatherMap(const Config& c) : qubits(c.qubits), k(c.positions.size()) {

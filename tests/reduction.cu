@@ -108,8 +108,8 @@ int main(int argc, char**) {
       }
     }
     // Resource/capacity rejection must occur before allocation or execution.
-    for (unsigned k : {1u, 3u, 4u, 8u}) {
-      Config probe; probe.qubits = 8; probe.positions.clear();
+    for (unsigned k : {1u, 3u, 4u, 8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u, 16u}) {
+      Config probe; probe.qubits = 16; probe.positions.clear();
       for (unsigned bit = 0; bit < k; ++bit) probe.positions.push_back(bit);
       try {
         GlobalReduction rejected(probe, GlobalLayout::thread_major, AccumulatorStorage::registers);

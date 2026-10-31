@@ -134,7 +134,8 @@ Matrix matrix(const Options& o) {
       AccumulatorStorage::global, GlobalLayout::thread_major, ReductionMethod::two_kernel, true});
   };
   if (o.preset == "single") add(o.config, "ordered");
-  else for (unsigned k = 1; k <= std::min(8u, o.config.qubits); ++k)
+  else for (unsigned k = 1;
+            k <= std::min(o.preset == "full" ? max_measurement_qubits : 8u, o.config.qubits); ++k)
     for (const auto& band : {"low", "middle", "high"}) {
       Config c = o.config;
       c.positions = contiguous_positions(c.qubits, k, band);

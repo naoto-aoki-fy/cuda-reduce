@@ -32,7 +32,7 @@ struct Stream {
   Stream() { cuda_check(cudaStreamCreateWithFlags(&value, cudaStreamNonBlocking)); }
   ~Stream() { cudaStreamDestroy(value); }
 };
-void check(Config c) {
+void check(Config c, bool segmented_only = false) {
   c.warmups = 1; c.repetitions = 2; c.sm_multiplier = 1;
   std::vector<std::complex<double>> host(c.state_size());
   std::vector<cuda::std::complex<double>> values;
@@ -47,6 +47,7 @@ void check(Config c) {
   // Segmented runs exactly once per input/position set, independent of S/layout.
   SegmentedReduction segmented(c);
   reuse(segmented, state, values, expected, stream.value);
+  if (segmented_only) return;
   for (unsigned block : {128u, 256u, 512u}) {
     c.block_size = block;
     for (auto storage : {AccumulatorStorage::global, AccumulatorStorage::shared})
@@ -82,9 +83,16 @@ int main() {
         Config c; c.qubits = q; c.positions = p; check(c);
       }
     }
+    // Exercise the expanded gather descriptor on bounded input, avoiding the
+    // large per-thread global workspace required by these measurement counts.
+    for (unsigned k = 9; k <= 16; ++k) {
+      Config c; c.qubits = 17; c.positions = contiguous_positions(17, k, "high");
+      std::reverse(c.positions.begin(), c.positions.end());
+      check(c, true);
+    }
     for (auto method : {ReductionMethod::two_kernel, ReductionMethod::cooperative})
-    for (unsigned k : {1u, 3u, 4u, 8u}) {
-      Config c; c.qubits = 8; c.positions = contiguous_positions(8, k, "low");
+    for (unsigned k : {1u, 3u, 4u, 8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u, 16u}) {
+      Config c; c.qubits = 16; c.positions = contiguous_positions(16, k, "low");
       try {
         GlobalReduction rejected(c, GlobalLayout::thread_major, AccumulatorStorage::registers,
           method, BlockPrimitive::cub);

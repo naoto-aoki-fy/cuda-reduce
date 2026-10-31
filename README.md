@@ -72,6 +72,9 @@ The GPU suite checks analytic fixtures, all k=1..8, all supported block sizes,
 both layouts, arbitrary/reversed positions, N smaller than T, grid-stride tails,
 and three invocations per workspace (NaN poison, reuse, then zero input). It also
 checks generated input with warmups and multiple repetitions on the same buffers.
+Host coverage includes k=9..16 position bands, reversed ordering, gather mapping
+at q=31 and bounded CPU references. CUB GPU coverage adds segmented reduction
+for k=9..16 on bounded input; register rejection checks include these counts.
 Transfers and reduction are tested with a nonblocking stream. The sanitizer
 target runs representative small cases through memcheck, synccheck and racecheck;
 an unsupported GPU test exits 77 and is not counted as a pass.
@@ -224,8 +227,9 @@ Step 6 full benchmark (32 GiB input plus active workspace):
 make benchmark-full BENCHMARK_ARGS='--block-sizes 256 --repetitions 1 --warmups 3'
 ```
 
-The default full preset retains all 2424 requested cases, including unsupported
-ones. Results are written to `build/full.json` and `build/full.csv`. Use
+The default full preset sweeps measured-qubit counts k=1..16 at fixed q=31 and
+retains all 4848 requested cases, including unsupported ones. Results are written
+to `build/full.json` and `build/full.csv`. Use
 `make benchmark-smoke` for a separately labelled small-input sweep. See the
 [Step 6 guide](docs/benchmark.md) for validation, memory preflight, timing,
 profiling, reproducible builds and limitations. Step 6 tests were skipped as

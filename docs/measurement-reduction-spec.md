@@ -6,7 +6,7 @@ This contract applies across all six implementation steps. Step 1 provides only 
 
 - The input is a read-only device array of `cuda::std::complex<double>`.
 - Let `N = 2^q`, where `q` is the number of state qubits.
-- Let `k = num_measure_qubits`, with `1 <= k <= min(8, q)`.
+- Let `k = num_measure_qubits`, with `1 <= k <= min(16, q)`.
 - Let `B = 2^k`.
 - The ordered list `positions[0..k-1]` contains distinct state-index bit positions in `[0, q)`.
 - `positions[t]` maps to bit `t` of the output bin. In particular, the first supplied position maps to the least significant bin bit.
@@ -79,7 +79,7 @@ can disagree with the supplied list. Defaults:
 | Option | Default | Constraints |
 | --- | --- | --- |
 | `--qubits` | 10 | 1 through 63, subject to checked allocation size |
-| `--positions` | `0` | 1 through min(8,q) distinct positions in [0,q) |
+| `--positions` | `0` | 1 through min(16,q) distinct positions in [0,q) |
 | `--block-size` | 256 | 128, 256, 512 |
 | `--sm-multiplier` | 8 | Positive; benchmark sweep remains {1,2,4,8,16} |
 | `--repetitions` | 1 | Positive |

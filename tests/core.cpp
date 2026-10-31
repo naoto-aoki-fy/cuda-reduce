@@ -43,6 +43,49 @@ int main() {
         require(bin_for(j, positions) == expected);
       }
     }
+    // Full-preset measurement counts, without allocating the q=31 state.
+    for (unsigned k = 9; k <= 16; ++k) {
+      for (const auto& band : {"low", "middle", "high"})
+      for (bool reverse : {false, true}) {
+        Config c; c.qubits = 31; c.positions = contiguous_positions(31, k, band);
+        require(c.positions.size() == k);
+        const unsigned start = std::string(band) == "low" ? 0 :
+          std::string(band) == "middle" ? (31-k)/2 : 31-k;
+        for (unsigned t = 0; t < k; ++t) require(c.positions[t] == start+t);
+        if (reverse) std::reverse(c.positions.begin(), c.positions.end());
+        c.validate();
+        require(c.state_size() == 2147483648ULL && c.bins() == power_of_two(k));
+        GatherMap map(c);
+        OffsetIterator offsets{{static_cast<LogicalOffset>(map.length)}, 0};
+        require(offsets[static_cast<LogicalOffset>(c.bins())] == 2147483648LL);
+        for (Size bin = 0; bin < c.bins(); ++bin) {
+          Size measured = 0;
+          for (unsigned t = 0; t < k; ++t)
+            measured |= ((bin >> t) & Size{1}) << c.positions[t];
+          for (Size offset : {Size{0}, map.length - 1}) {
+            const Size j = map(static_cast<LogicalOffset>(bin * map.length + offset));
+            const Size remaining_mask = (c.state_size() - 1) & ~map.measured_mask;
+            require(j == (measured | (offset ? remaining_mask : 0)));
+            require(bin_for(j, c.positions) == bin);
+          }
+        }
+      }
+      // Bounded full-input CPU reference, including all 65536 bins at k=16.
+      Config c; c.qubits = k; c.positions = contiguous_positions(k, k, "low");
+      std::reverse(c.positions.begin(), c.positions.end());
+      std::vector<std::complex<double>> values(c.state_size(), {1, 0});
+      CpuReference reference(c);
+      reference.add_chunk(0, values.data(), values.size());
+      require(reference.finish() == std::vector<long double>(c.bins(), 1));
+    }
+    {
+      Config c; c.qubits = 31; c.positions.clear();
+      for (unsigned t = 0; t < 17; ++t) c.positions.push_back(t+1);
+      rejects<std::invalid_argument>([&] { c.validate(); });
+      rejects<std::invalid_argument>([&] { bin_for(0, c.positions); });
+      rejects<std::invalid_argument>([] { contiguous_positions(31, 17, "low"); });
+      rejects<std::invalid_argument>([] { contiguous_positions(15, 16, "high"); });
+    }
     // Independent gather bijection and per-bin CPU comparison for every small k.
     for (unsigned q = 1; q <= 8; ++q)
     for (unsigned k = 1; k <= q; ++k) {

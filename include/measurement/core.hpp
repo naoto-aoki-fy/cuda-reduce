@@ -8,6 +8,7 @@
 namespace measurement {
 using Size = std::uint64_t;
 constexpr Size default_seed = 20261031;
+constexpr unsigned max_measurement_qubits = 16;
 Size checked_add(Size a, Size b);
 Size checked_mul(Size a, Size b);
 Size power_of_two(unsigned exponent);
