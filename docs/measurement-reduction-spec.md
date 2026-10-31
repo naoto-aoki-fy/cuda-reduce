@@ -180,3 +180,41 @@ not the mathematical mapping or accumulation order.
 Elapsed time and DRAM profiling bytes use optional values. An absent value means
 unavailable; zero is reserved for an actually observed zero. Future metrics must
 follow the same rule. No profiling values are collected by the Step 1 driver.
+
+## Step 2: global-memory independent reduction
+
+`GlobalReduction` implements both global accumulator layouts with two custom
+kernels, each launched with exactly G blocks and the configured 128, 256 or 512
+threads. Measurement count and positions remain runtime parameters. Thread g
+initializes its B accumulators and traverses J=g+T*j once. Each bin is then
+reduced within the block by full-mask warp shuffles and a shared-memory reduction
+of warp totals. These supported block sizes contain only full warps; every thread,
+including threads without input, participates in the collectives. A trailing
+block barrier protects shared scratch reuse across bins.
+
+Partials always use `partials[bin*G+block_id]`, independently of accumulator
+layout. The second kernel owns bins via `bin=blockIdx.x; bin<B; bin+=G`, distributes
+the G partials across its threads and uses the same block reduction. Same-stream
+kernel ordering supplies the inter-kernel dependency. All partials and outputs
+are overwritten before consumption, so they need no separate clear operation.
+
+Per-workspace device allocations are 8*T*B accumulator bytes, 8*G*B partial bytes,
+8*B output bytes and k*sizeof(unsigned) position bytes. Both kernels separately
+use 128 shared scratch bytes per block. All allocation products are checked and
+device/kernel launch limits are validated; no requested setting is adjusted.
+CUDA allocation exhaustion and launch resource limits produce unsupported status;
+invalid input, arithmetic overflow, execution errors and output mismatches remain
+failures. Workspace construction errors throw; the driver classifies them.
+
+The reduction source uses no atomic operations, CUB, or device library reduction
+routines. Synchronization consists only of warp shuffles, block barriers and
+same-stream kernel ordering; no cooperative or spin barrier is present. Source
+audit is complete; generated device code has not been audited without nvcc.
+
+`run` returns average CUDA-event milliseconds across requested repetitions, after
+the requested warmups. Initialization and both kernel launches are inside the
+timed operation. Workspace allocation, host output allocation, event creation,
+input generation, position upload and output download are outside timing. CPU
+comparison uses |GPU-reference| <= 1e-12 + 1e-11*|reference| and rejects nonfinite
+GPU values. Profiling bytes remain unavailable. No full benchmark is run in
+Step 2; see README for validation commands and environment limitations.
