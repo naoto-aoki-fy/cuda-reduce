@@ -24,7 +24,7 @@ $(BUILD):
 	mkdir -p $@
 
 $(HOST_OBJECT): src/core.cpp include/measurement/core.hpp | $(BUILD)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++17 -MMD -MP -c $< -o $@
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -fPIC -std=c++17 -MMD -MP -c $< -o $@
 
 $(BUILD)/libmeasurement_core.a: $(HOST_OBJECT)
 	$(AR) rcs $@ $^
