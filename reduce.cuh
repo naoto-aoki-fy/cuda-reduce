@@ -62,24 +62,29 @@ template<class InputT,class AccT,class Op> __global__ void cooperative_kernel(co
  PartialReader<AccT> r{partial,k,p};
  for(uint64_t t=blockIdx.x;t<tiles;) { reduce_tile<AccT>(r,out,t,k,shared); if(tiles-t<=gridDim.x) break; t+=gridDim.x; }
 }
-template<class InputT,class AccT,class Op> Status make_plan(uint64_t n,uint64_t k,Mode mode,Plan& plan,cudaError_t* error=nullptr) {
+template<class InputT,class AccT,class Op> Status make_plan(uint64_t n,uint64_t k,Mode mode,Plan& plan,cudaError_t* error=nullptr,unsigned sm_multiplier=4) {
  plan=Plan{}; plan.n=n; plan.k=k; plan.mode=mode; if(error) *error=cudaSuccess;
+ if(!sm_multiplier) return Status::invalid_argument;
  if(!k) return Status::success;
  uint64_t elements, bytes, partials;
  if(!mul(n,k,elements) || !mul(elements,sizeof(InputT),bytes) || bytes>SIZE_MAX || !mul(k,sizeof(AccT),bytes) || bytes>SIZE_MAX) return Status::overflow;
- plan.tiles=ceil_div(k,32); plan.partitions=std::max<uint64_t>(1,std::min<uint64_t>(32,ceil_div(n,256)));
- if(!mul(plan.partitions,k,partials) || !mul(partials,sizeof(AccT),bytes) || bytes>SIZE_MAX || !mul(plan.tiles,plan.partitions,plan.tasks)) return Status::overflow;
- plan.workspace_bytes=static_cast<size_t>(bytes);
  cudaError_t e=cudaGetDevice(&plan.device); if(e!=cudaSuccess) { if(error)*error=e; return Status::cuda_error; }
  cudaDeviceProp prop{}; e=cudaGetDeviceProperties(&prop,plan.device); if(e!=cudaSuccess) { if(error)*error=e; return Status::cuda_error; }
- uint64_t limit;
+ if(prop.multiProcessorCount<=0 || prop.maxGridSize[0]<=0) return Status::invalid_argument;
+ uint64_t limit=uint64_t(prop.multiProcessorCount)*sm_multiplier;
+ limit=std::min<uint64_t>(limit,static_cast<uint64_t>(prop.maxGridSize[0]));
  if(mode==Mode::cooperative) {
   if(!prop.cooperativeLaunch) return Status::cooperative_unsupported;
   int active=0; e=cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active,cooperative_kernel<InputT,AccT,Op>,block_size,0);
   if(e!=cudaSuccess) { if(error)*error=e; return Status::cuda_error; }
-  limit=uint64_t(active)*prop.multiProcessorCount; if(!limit) return Status::cooperative_unsupported;
- } else limit=uint64_t(prop.multiProcessorCount)*8;
- limit=std::min<uint64_t>(limit,static_cast<uint64_t>(prop.maxGridSize[0]));
+  if(active<=0) return Status::cooperative_unsupported;
+  limit=std::min<uint64_t>(limit,uint64_t(active)*prop.multiProcessorCount);
+ }
+ // Channel tiles already supply independent work; split rows only to fill the grid.
+ plan.tiles=ceil_div(k,tile_channels);
+ plan.partitions=std::max<uint64_t>(1,std::min(ceil_div(n,block_size),ceil_div(limit,plan.tiles)));
+ if(!mul(plan.partitions,k,partials) || !mul(partials,sizeof(AccT),bytes) || bytes>SIZE_MAX || !mul(plan.tiles,plan.partitions,plan.tasks)) return Status::overflow;
+ plan.workspace_bytes=static_cast<size_t>(bytes);
  plan.blocks=static_cast<unsigned>(std::min<uint64_t>(plan.tasks,limit)); return plan.blocks?Status::success:Status::invalid_argument;
 }
 template<class InputT,class AccT,class Op> Status execute(const Plan& plan,const InputT* input,AccT* output,Op op,cudaStream_t stream,void* workspace,size_t workspace_bytes,cudaError_t* error=nullptr) {
@@ -90,7 +95,10 @@ template<class InputT,class AccT,class Op> Status execute(const Plan& plan,const
  AccT* partial=static_cast<AccT*>(workspace);
  if(plan.mode==Mode::two_kernel) {
   first_kernel<InputT,AccT,Op><<<plan.blocks,block_size,0,stream>>>(input,partial,plan.n,plan.k,plan.partitions,plan.tasks,op);
-  e=cudaGetLastError(); if(e==cudaSuccess) { second_kernel<AccT><<<plan.blocks,block_size,0,stream>>>(partial,output,plan.k,plan.partitions,plan.tiles); e=cudaGetLastError(); }
+  e=cudaGetLastError(); if(e==cudaSuccess) {
+   unsigned second_blocks=static_cast<unsigned>(std::min<uint64_t>(plan.blocks,plan.tiles));
+   second_kernel<AccT><<<second_blocks,block_size,0,stream>>>(partial,output,plan.k,plan.partitions,plan.tiles); e=cudaGetLastError();
+  }
  } else {
   auto n=plan.n,k=plan.k,p=plan.partitions,tasks=plan.tasks,tiles=plan.tiles;
   void* args[]={&input,&output,&partial,&n,&k,&p,&tasks,&tiles,&op};

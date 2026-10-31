@@ -25,6 +25,7 @@ By default each configuration gets one warmup and three timed repetitions. The p
 
 ```sh
 ./reduce_demo bench-fixed --quick                     # 2^24 elements, no warmup, one repetition
+./reduce_demo bench-fixed --sm-multiplier 8           # target eight first-stage blocks per SM
 ./reduce_demo bench-fixed --max-cub-k 1024            # run all K values for every supported method
 ./reduce_demo bench-fixed --max-reps 10 --target-ms 500
 ./reduce_demo bench-fixed --budget-seconds 120 > results.csv
@@ -32,7 +33,7 @@ By default each configuration gets one warmup and three timed repetitions. The p
 
 `--max-cub-k K` accepts 1 through 1024; `--max-reps N` sets the maximum timed invocations (default 3, or 1 in quick mode unless explicitly set). With `--target-ms`, measurement stops after the cumulative CUDA event time reaches the target or the maximum count is reached. Without it, the maximum count is used. Counts can differ between implementations; latency is the mean per invocation. `--budget-seconds` is a wall-clock budget beginning before device setup. It is checked between synchronized invocations and configurations; a running invocation is allowed to finish, and a partially measured configuration is reported with its actual count. Remaining configurations are skipped. The budget is therefore not a hard deadline, especially during initialization or an individual slow invocation. Quick mode reduces the input to 2^24 elements (256 MiB), so its results are not directly comparable to the normal fixed-size sweep.
 
-The per-channel CUB launch count is not the only potential cost: the custom first phase is limited to 32 partitions per channel tile, so K=1 uses only 32 blocks to process the entire 16 GiB input. At large K, both CUB baselines use strided reads, which can reduce memory coalescing. These are structural observations; actual performance depends on the GPU and toolkit.
+The custom first phase targets four blocks per SM by default, with enough row partitions to fill that grid when channel tiles alone do not provide sufficient work. `bench-fixed --sm-multiplier N` accepts a positive integer through `UINT_MAX` to change this target. Both benchmarks report the SM count and requested target; the CSV `blocks` column is the actual first-stage grid (the cooperative grid in cooperative mode), and `partitions` is the row partition count. At large K, both CUB baselines use strided reads, which can reduce memory coalescing. Actual performance depends on the GPU and toolkit.
 
 ## Usage
 
@@ -47,6 +48,8 @@ column_reduce::Plan plan;
 cudaError_t cuda_error;
 auto status = column_reduce::make_plan<float, double, Scale>(
     n, k, column_reduce::Mode::two_kernel, plan, &cuda_error);
+// Optional final argument changes the default multiplier of 4:
+// make_plan<float, double, Scale>(n, k, mode, plan, &cuda_error, 8);
 // Check status (including cooperative_unsupported for Mode::cooperative).
 void* workspace = nullptr;
 if (plan.workspace_bytes) cudaMalloc(&workspace, plan.workspace_bytes);
@@ -55,7 +58,7 @@ status = column_reduce::execute(plan, input, output, Scale{2.0}, stream,
 // Check status; wait for stream completion before reading output or freeing buffers.
 ```
 
-Planning queries the current device; reuse a plan only for the same input/accumulator/transform types, device, dimensions, and mode. The plan is an immutable contract after successful planning. Execution is asynchronous, uses the supplied stream, and does not allocate, transfer, or synchronize. CUDA errors from asynchronous execution can surface on later stream synchronization. `K=0` is a no-op; `N=0, K>0` writes zero through the same two phases, and input may be null. Nonempty channel sets require output and workspace; insufficient or incorrectly aligned workspace is rejected. The workspace needs `alignof(AccT)` alignment (cudaMalloc satisfies it); input, output, and workspace must not overlap. Keep all buffers alive until stream completion. Concurrent calls require separate output and workspace, unless stream dependencies serialize them. The caller must ensure the input allocation covers `N*K` elements and output covers `K`.
+Planning queries the current device; reuse a plan only for the same input/accumulator/transform types, device, dimensions, mode, and multiplier. The optional final `unsigned sm_multiplier` argument defaults to 4, preserving existing call sites; pass `nullptr` for the error pointer if only setting the multiplier. Zero is rejected with `invalid_argument`. The plan is an immutable contract after successful planning. Execution is asynchronous, uses the supplied stream, and does not allocate, transfer, or synchronize. CUDA errors from asynchronous execution can surface on later stream synchronization. With a valid multiplier, `K=0` is a no-op; `N=0, K>0` writes zero through the same two phases, and input may be null. Nonempty channel sets require output and workspace; insufficient or incorrectly aligned workspace is rejected. The workspace needs `alignof(AccT)` alignment (cudaMalloc satisfies it); input, output, and workspace must not overlap. Keep all buffers alive until stream completion. Concurrent calls require separate output and workspace, unless stream dependencies serialize them. The caller must ensure the input allocation covers `N*K` elements and output covers `K`.
 
 ## Mapping and synchronization
 
@@ -63,9 +66,11 @@ A 256-thread block has eight warps. Each task handles one channel tile of up to 
 
 Each thread accumulates in registers using a row grid-stride loop. Shuffle steps of `width` combine only matching channels; the first row group writes each warp's result to shared memory and the first warp combines eight warp sums. Full warps and uniform block barriers are required: the API always launches exactly 256 threads. Padding contributes zero and never invokes the transform. Complex shuffles explicitly move real and imaginary components.
 
-The workspace contains `P*K` accumulator values in `[partition][channel]` order, with `P = max(1, min(32, ceil(N/256)))`. Blocks grid-stride over `ceil(K/32)*P` tasks, so each partial is written on every call, including empty rows. The second phase reads these partials directly and grid-strides over channel tiles. Two-kernel mode always launches both kernels for K>0. Cooperative mode uses the same phases in one kernel, with one unconditional grid synchronization between them. Its one-dimensional physical grid is limited by occupancy of the instantiated kernel and the device multiprocessor count; both modes use zero dynamic shared memory. No atomics are used. Fixed configurations give fixed reduction grouping, but floating point results need not match sequential sums, other configurations, or other architectures bitwise.
+Let `T = ceil(K/32)` and let `L` be the requested `num_SMs * sm_multiplier` block count capped by the device's one-dimensional CUDA grid limit. Cooperative mode also caps `L` at `active_blocks_per_SM * num_SMs`, using occupancy of the instantiated cooperative kernel with 256 threads and zero dynamic shared memory. The workspace contains `P*K` accumulator values in `[partition][channel]` order, with `P = max(1, min(ceil(N/256), ceil(L/T)))` for K>0. This removes the old 32-partition cap, adds only enough row partitions to supply the target grid, and uses one partition when channel tiles already fill the grid. Small inputs cap row partitioning at `ceil(N/256)`; empty rows use one partition. Workspace and task sizes retain overflow checks.
 
-Tests compare against long-double CPU accumulation of the transformed values, with an absolute tolerance of `1e-12 * (1 + sum(abs(transformed values)))`, accounting for cancellation and different summation orders. They include nonzero-at-zero transforms, irregular tails, channel-specific values, alternating signs, and repeated workspace use.
+The first phase launches `min(T*P, L)` blocks of exactly 256 threads, grid-striding over `T*P` tasks, so each partial is written on every call, including empty rows. For N=2^30 and K=1, two-kernel mode launches `num_SMs * 4` first-stage blocks by default when grid and work limits permit: 528 blocks on a 132-SM GPU. Its second kernel launches `min(plan.blocks, T)` blocks to read these partials and grid-stride over channel tiles; for K=1 that is one block. Two-kernel mode always launches both kernels for K>0. Cooperative mode uses the same phases in one kernel, with one unconditional grid synchronization between them; its resident grid stays unchanged for both phases. Both modes use zero dynamic shared memory. No atomics are used. Fixed configurations give fixed reduction grouping, but floating point results need not match sequential sums, other multipliers, other configurations, or other architectures bitwise.
+
+Tests compare against long-double CPU accumulation of the transformed values, with an absolute tolerance of `1e-12 * (1 + sum(abs(transformed values)))`, accounting for cancellation and different summation orders. They include nonzero-at-zero transforms, irregular tails, channel-specific values, alternating signs, and repeated workspace use. Planning checks in both `test` and `test-quick` cover N=2^30/K=1 without allocating the input, multipliers 1/4/7/UINT_MAX, small/empty inputs, channel tiles that already fill the grid, overflow, and cooperative occupancy limits. Full tests also check million-row inputs for K=1/3 and 65,549 rows for K=33 with multipliers 1/4/7 in both supported execution modes. `bench` includes K=1, and `bench-fixed` exercises the full N=2^30/K=1 execution (or N=2^24 in quick mode).
 
 ## CUB comparison baselines
 
