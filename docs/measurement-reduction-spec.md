@@ -218,3 +218,52 @@ input generation, position upload and output download are outside timing. CPU
 comparison uses |GPU-reference| <= 1e-12 + 1e-11*|reference| and rejects nonfinite
 GPU values. Profiling bytes remain unavailable. No full benchmark is run in
 Step 2; see README for validation commands and environment limitations.
+
+## Step 3: shared storage and register evidence
+
+The existing two-stage reduction, runtime bin extraction, exact G blocks per
+kernel, finalization, timing, and strict atomic policy also apply to Step 3.
+`GlobalReduction(config, layout, storage)` preserves the original global default.
+Shared first-stage accumulators are block-local, with thread ID t and block
+size S: thread-major `sums[t*B+bin]`, bin-major `sums[bin*S+t]`. Every invocation
+initializes all B doubles per thread and reads each assigned amplitude once.
+Partials and output are overwritten as in Step 2. Global accumulator allocation
+is zero for shared and register storage; other workspace products remain checked.
+
+The shared first stage uses `8*S*B` dynamic bytes plus the exact kernel's queried
+static allocation, currently 128 scratch bytes. Dynamic storage is declared as
+extern shared doubles, so its base and length have eight-byte alignment with no
+additional padding. Query device default/opt-in shared limits and both exact
+kernel attributes. When the request exceeds the default and fits the device
+opt-in budget, request cudaFuncAttributeMaxDynamicSharedMemorySize as necessary
+before rejection. Do not lower an already larger kernel allowance: previously
+constructed workspaces must remain usable. Reject over-limit requests with
+requested dynamic bytes, static bytes, default/opt-in limits, and the applicable
+kernel dynamic limit. Check exact kernel max threads and occupancy for both
+stages; zero active blocks is unsupported. Record registers/thread, local
+bytes/thread, shared bytes and theoretical occupancy. No silent adaptation is
+allowed. Shared support is device/build dependent, per the README byte table.
+
+The register candidate has eight named scalar double accumulators and supports
+runtime k=1..3 within its fixed capacity; no measurement-specific instantiation
+or dispatch exists. Layout is not applicable. Runtime k=4..8 is unsupported.
+Scalar source, zero reported spills, and kernel localSizeBytes alone are not
+proof of register residency. Each actual binary and architecture requires ptxas
+resource/spill reports and PTX/SASS analysis tracing the bin accumulators and
+all relevant local operations, including called functions. Record compiler
+version, flags, architecture, source/binary hashes and per-kernel findings.
+Spilling or direct local bin allocation violates this backend's contract.
+
+`make cuda-evidence CUDA_ARCH=sm_XX` captures evidence for a separate driver
+build with the requested architecture and retained intermediates. Capture is
+not certification. Until reviewed evidence is bound to the actual build, every
+in-capacity register request is unverified and rejected without benchmarking.
+There are currently no certified register architectures; follow-up certification
+must add the build-bound gate and correctness tests before permitting timing.
+
+GPU tests preserve all Step 2 cases and add supported shared layouts against CPU
+and global output, repeated reuse with changed input, constructor resource
+rejection with requested-byte diagnostics, and unverified/capacity register
+rejection. Representative sanitizer invocations use the existing sanitize target.
+Actual host/GPU results and the environment's support matrix are recorded in
+README. No cooperative launch or CUB implementation is part of Step 3.

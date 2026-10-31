@@ -61,3 +61,8 @@ clean:
 	$(RM) -r $(BUILD)
 
 -include $(BUILD)/*.d
+
+# Explicit architecture is required; artifacts never enable register timing.
+.PHONY: cuda-evidence
+cuda-evidence:
+	python3 tools/capture_cuda_evidence.py --arch '$(CUDA_ARCH)' --nvcc '$(NVCC)' --flags='$(NVCCFLAGS)'

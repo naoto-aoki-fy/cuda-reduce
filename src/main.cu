@@ -9,10 +9,18 @@ int main(int argc, char** argv) {
     std::cout << "CPU reference: success\n";
     for (std::size_t b = 0; b < bins.size(); ++b) std::cout << b << ' ' << bins[b] << '\n';
     bool failed = false;
+    for (auto storage : {measurement::AccumulatorStorage::global, measurement::AccumulatorStorage::shared,
+                         measurement::AccumulatorStorage::registers})
     for (auto layout : {measurement::GlobalLayout::thread_major, measurement::GlobalLayout::bin_major}) {
+      if (storage == measurement::AccumulatorStorage::registers && layout == measurement::GlobalLayout::bin_major) continue;
+      const std::string label = std::string(measurement::storage_name(storage)) + " " +
+        (storage == measurement::AccumulatorStorage::registers ? "" :
+         layout == measurement::GlobalLayout::thread_major ? "thread-major" : "bin-major");
       measurement::Result result;
       try {
-        measurement::GlobalReduction reduction(config, layout);
+        std::cout << label << " resources: " << measurement::resource_description(
+          measurement::reduction_resources(config, storage)) << '\n';
+        measurement::GlobalReduction reduction(config, layout, storage);
         std::vector<double> output;
         result = reduction.run(state, output);
         if (result.status == measurement::Status::success) {
@@ -30,7 +38,7 @@ int main(int argc, char** argv) {
         result.status = measurement::Status::unsupported;
         result.reason = e.what();
       }
-      std::cout << measurement::layout_name(layout) << ": " << measurement::status_name(result.status);
+      std::cout << label << ": " << measurement::status_name(result.status);
       if (!result.reason.empty()) std::cout << " (" << result.reason << ')';
       if (result.elapsed_ms) std::cout << "; mean ms: " << *result.elapsed_ms;
       std::cout << '\n';

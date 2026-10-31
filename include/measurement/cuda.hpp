@@ -41,12 +41,30 @@ DeviceState generate_state(const Config& config);
 std::vector<long double> reference_device_state(const Config& config, const DeviceState& state);
 enum class GlobalLayout { thread_major, bin_major };
 const char* layout_name(GlobalLayout layout);
+enum class AccumulatorStorage { global, shared, registers };
+const char* storage_name(AccumulatorStorage storage);
+struct KernelResources {
+  int registers_per_thread = 0;
+  Size local_bytes_per_thread = 0, static_shared_bytes = 0, dynamic_shared_bytes = 0;
+  int max_threads = 0, active_blocks_per_sm = 0;
+  double theoretical_occupancy = 0;
+};
+struct ReductionResources {
+  Size blocks = 0;
+  KernelResources first, second;
+  Size default_shared_limit = 0, optin_shared_limit = 0;
+  int dynamic_shared_limit = 0;
+  bool register_residency_verified = false;
+};
+ReductionResources reduction_resources(const Config&, AccumulatorStorage);
+std::string resource_description(const ReductionResources&);
 
 // Owns reusable buffers; construction and position upload are outside timing.
 // Use on the device where it was constructed. Calls on one workspace are serial.
 class GlobalReduction {
  public:
-  GlobalReduction(const Config& config, GlobalLayout layout);
+  GlobalReduction(const Config& config, GlobalLayout layout,
+                  AccumulatorStorage storage = AccumulatorStorage::global);
   void execute(const DeviceState& state, cudaStream_t stream = nullptr);
   Result run(const DeviceState& state, std::vector<double>& output,
              cudaStream_t stream = nullptr);
@@ -57,6 +75,8 @@ class GlobalReduction {
  private:
   Config config_;
   GlobalLayout layout_;
+  AccumulatorStorage storage_;
+  Size dynamic_shared_ = 0;
   Size blocks_, threads_;
   DeviceBuffer<unsigned> positions_;
   DeviceBuffer<double> sums_, partials_, output_;
