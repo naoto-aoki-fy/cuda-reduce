@@ -13,7 +13,7 @@
 using namespace measurement;
 namespace {
 using Fields = std::map<std::string, std::string>; // Values are JSON tokens.
-std::string quoted(const std::string& value) {
+std::string json_quote(const std::string& value) {
   std::ostringstream out;
   out << '"';
   for (unsigned char c : value) {
@@ -38,7 +38,7 @@ std::string json(const Fields& f) {
   std::string s = "{";
   for (const auto& p : f) {
     if (s.size() > 1) s += ',';
-    s += quoted(p.first) + ':' + p.second;
+    s += json_quote(p.first) + ':' + p.second;
   }
   return s + '}';
 }
@@ -174,31 +174,32 @@ std::vector<std::vector<long double>> references(const Matrix& m, const DeviceSt
   for (std::size_t i = 0; i < cpu.size(); ++i) result[indices[i]] = cpu[i].finish();
   return result;
 }
-constexpr long double atol = 1e-12L, rtol = 1e-11L;
+constexpr long double kAbsoluteTolerance = 1e-12L;
+constexpr long double kRelativeTolerance = 1e-11L;
 bool validate(Fields& row, const std::vector<double>& output, const std::vector<long double>& ref) {
   if (output.size() != ref.size()) throw std::runtime_error("output bin count mismatch");
   long double max_abs = 0, max_relative = 0, actual_total = 0, ref_total = 0;
   bool ok = true;
   for (std::size_t b = 0; b < ref.size(); ++b) {
     const long double err = std::abs(static_cast<long double>(output[b]) - ref[b]);
-    ok &= std::isfinite(output[b]) && err <= atol + rtol * std::abs(ref[b]);
+    ok &= std::isfinite(output[b]) && err <= kAbsoluteTolerance + kRelativeTolerance * std::abs(ref[b]);
     if (!std::isfinite(output[b])) {
-      row["validation_status"] = quoted("failure");
-      row["validation_reason"] = quoted("nonfinite output at bin " + std::to_string(b));
+      row["validation_status"] = json_quote("failure");
+      row["validation_reason"] = json_quote("nonfinite output at bin " + std::to_string(b));
       return false;
     }
     max_abs = std::max(max_abs, err);
-    max_relative = std::max(max_relative, err / std::max(std::abs(ref[b]), atol));
+    max_relative = std::max(max_relative, err / std::max(std::abs(ref[b]), kAbsoluteTolerance));
     actual_total += output[b]; ref_total += ref[b];
   }
   long double total_error = std::abs(actual_total - ref_total);
-  ok &= total_error <= atol + rtol * std::abs(ref_total);
+  ok &= total_error <= kAbsoluteTolerance + kRelativeTolerance * std::abs(ref_total);
   row["max_absolute_error"] = number(max_abs);
   row["max_relative_error"] = number(max_relative);
   row["reference_total_norm"] = number(ref_total);
   row["total_norm_absolute_error"] = number(total_error);
-  row["validation_status"] = quoted(ok ? "success" : "failure");
-  row["validation_reason"] = quoted(ok ? "every bin and total norm; entire actual device input" : "bin or total norm tolerance exceeded");
+  row["validation_status"] = json_quote(ok ? "success" : "failure");
+  row["validation_reason"] = json_quote(ok ? "every bin and total norm; entire actual device input" : "bin or total norm tolerance exceeded");
   return ok;
 }
 void kernel(Fields& row, const KernelResources& r, unsigned stage) {
@@ -222,25 +223,25 @@ Fields row_template(const Case& x, Size id, const Options& o) {
   for (unsigned stage : {1u, 2u}) for (const auto* field : {"binary_architecture", "ptx_architecture", "registers_per_thread", "local_bytes_per_thread",
     "static_shared_bytes_per_block", "dynamic_shared_bytes_per_block", "active_blocks_per_sm", "theoretical_occupancy"})
     row["stage" + std::to_string(stage) + '_' + field] = "null";
-  row["case_id"] = number(id); row["preset"] = quoted(o.preset);
+  row["case_id"] = number(id); row["preset"] = json_quote(o.preset);
   row["N"] = number(x.c.state_size()); row["state_bytes"] = number(allocation_bytes(x.c.state_size(), sizeof(cuda::std::complex<double>)));
-  row["k"] = number(x.c.positions.size()); row["positions"] = array(x.c.positions); row["band"] = quoted(x.band);
+  row["k"] = number(x.c.positions.size()); row["positions"] = array(x.c.positions); row["band"] = json_quote(x.band);
   row["seed"] = number(x.c.seed); row["chunk_elements"] = number(x.c.chunk_elements);
   row["repetitions"] = number(x.c.repetitions); row["warmups"] = number(x.c.warmups);
-  row["method"] = quoted(x.segmented ? "CUB DeviceSegmentedReduce" : x.primitive == BlockPrimitive::cub ? "CUB BlockReduce" : "custom");
-  row["strategy"] = x.segmented ? "null" : quoted(x.method == ReductionMethod::cooperative ? "cooperative" : "two_kernel");
-  row["storage"] = x.segmented ? "null" : quoted(x.storage == AccumulatorStorage::registers ? "registers" : x.storage == AccumulatorStorage::shared ? "shared" : "global");
-  row["layout"] = x.segmented || x.storage == AccumulatorStorage::registers ? "null" : quoted(x.layout == GlobalLayout::thread_major ? "thread_major" : "bin_major");
+  row["method"] = json_quote(x.segmented ? "CUB DeviceSegmentedReduce" : x.primitive == BlockPrimitive::cub ? "CUB BlockReduce" : "custom");
+  row["strategy"] = x.segmented ? "null" : json_quote(x.method == ReductionMethod::cooperative ? "cooperative" : "two_kernel");
+  row["storage"] = x.segmented ? "null" : json_quote(x.storage == AccumulatorStorage::registers ? "registers" : x.storage == AccumulatorStorage::shared ? "shared" : "global");
+  row["layout"] = x.segmented || x.storage == AccumulatorStorage::registers ? "null" : json_quote(x.layout == GlobalLayout::thread_major ? "thread_major" : "bin_major");
   row["block_size"] = x.segmented ? "null" : number(x.c.block_size);
   row["sm_multiplier"] = x.segmented ? "null" : number(x.c.sm_multiplier);
-  row["status"] = quoted("not_run"); row["timing_status"] = quoted("not_run");
-  row["validation_status"] = quoted(o.validate ? "not_run" : "skipped");
-  row["validation_reason"] = quoted(""); row["reason"] = quoted(""); row["resources"] = "null";
-  row["absolute_tolerance"] = number(atol); row["relative_tolerance"] = number(rtol);
+  row["status"] = json_quote("not_run"); row["timing_status"] = json_quote("not_run");
+  row["validation_status"] = json_quote(o.validate ? "not_run" : "skipped");
+  row["validation_reason"] = json_quote(""); row["reason"] = json_quote(""); row["resources"] = "null";
+  row["absolute_tolerance"] = number(kAbsoluteTolerance); row["relative_tolerance"] = number(kRelativeTolerance);
   row["raw_elapsed_ms"] = "[]"; row["profiling_run"] = o.profile_case ? "true" : "false";
-  row["profiling_status"] = quoted("not_run");
-  row["runtime_metrics_status"] = quoted("unavailable; separate tools/profile_benchmark.py run required");
-  row["compiler_spill_status"] = quoted("unavailable in runtime API; compiler information in make cuda-evidence build.log");
+  row["profiling_status"] = json_quote("not_run");
+  row["runtime_metrics_status"] = json_quote("unavailable; separate tools/profile_benchmark.py run required");
+  row["compiler_spill_status"] = json_quote("unavailable in runtime API; compiler information in make cuda-evidence build.log");
   return row;
 }
 class Writer {
@@ -276,8 +277,8 @@ int main(int argc, char** argv) {
     const auto o = options(argc, argv);
     const auto m = matrix(o);
     if (o.profile_case && *o.profile_case >= m.cases.size()) throw std::invalid_argument("profile case outside matrix");
-    Fields metadata{{"build", MEASUREMENT_BUILD_INFO}, {"cub", quoted(cub_version_description())},
-      {"input_generation", quoted("PHILOX4_32_10; PSEUDO_DEFAULT; offset=0; uniform doubles (0,1]; 2^20 amplitudes/chunk")},
+    Fields metadata{{"build", MEASUREMENT_BUILD_INFO}, {"cub", json_quote(cub_version_description())},
+      {"input_generation", json_quote("PHILOX4_32_10; PSEUDO_DEFAULT; offset=0; uniform doubles (0,1]; 2^20 amplitudes/chunk")},
       {"GPU", "null"}, {"compute_capability", "null"}, {"SM_count", "null"},
       {"CUDA_runtime", "null"}, {"CUDA_driver", "null"}, {"cuRAND", "null"}};
     std::string startup_reason;
@@ -294,8 +295,8 @@ int main(int argc, char** argv) {
       cuda_check(availability);
       int device; cuda_check(cudaGetDevice(&device));
       cudaDeviceProp prop{}; cuda_check(cudaGetDeviceProperties(&prop, device));
-      metadata["GPU"] = quoted(prop.name); metadata["SM_count"] = number(prop.multiProcessorCount);
-      metadata["compute_capability"] = quoted(std::to_string(prop.major) + '.' + std::to_string(prop.minor));
+      metadata["GPU"] = json_quote(prop.name); metadata["SM_count"] = number(prop.multiProcessorCount);
+      metadata["compute_capability"] = json_quote(std::to_string(prop.major) + '.' + std::to_string(prop.minor));
       int runtime, driver, curand;
       cuda_check(cudaRuntimeGetVersion(&runtime)); cuda_check(cudaDriverGetVersion(&driver));
       curand_check(curandGetVersion(&curand));
@@ -311,8 +312,8 @@ int main(int argc, char** argv) {
       }
     } catch (const Unsupported& e) { startup = Status::unsupported; startup_reason = e.what(); }
       catch (const std::exception& e) { startup = Status::failure; startup_reason = e.what(); }
-    metadata["startup_status"] = quoted(status_name(startup));
-    metadata["startup_reason"] = quoted(startup_reason);
+    metadata["startup_status"] = json_quote(status_name(startup));
+    metadata["startup_reason"] = json_quote(startup_reason);
     Writer writer(o.prefix, metadata);
     std::map<std::string, Size> counts{{"success",0}, {"unsupported",0}, {"failure",0}, {"not_run",0}};
     std::map<std::string, std::vector<double>> matching;
@@ -324,18 +325,18 @@ int main(int argc, char** argv) {
       // CSV rows carry identical run metadata as JSON's metadata object.
       for (const auto& p : metadata) row["run_" + p.first] = p.second;
       Status status = Status::not_run;
-      if (o.profile_case && id != *o.profile_case) row["reason"] = quoted("not selected for separate profiling run");
+      if (o.profile_case && id != *o.profile_case) row["reason"] = json_quote("not selected for separate profiling run");
       else if (startup != Status::success) {
         status = startup == Status::unsupported ? Status::unsupported : Status::not_run;
-        row["reason"] = quoted("input/reference setup: " + startup_reason);
-        row["timing_status"] = quoted(status_name(status));
-      } else if (poisoned) row["reason"] = quoted("not attempted after unexpected execution error");
+        row["reason"] = json_quote("input/reference setup: " + startup_reason);
+        row["timing_status"] = json_quote(status_name(status));
+      } else if (poisoned) row["reason"] = json_quote("not attempted after unexpected execution error");
       else try {
         Size workspace = 0;
         if (x.segmented) workspace = segmented_workspace_bytes(x.c);
         else {
           auto r = reduction_resources(x.c, x.storage, x.method, x.primitive);
-          row["resources"] = quoted(resource_description(r));
+          row["resources"] = json_quote(resource_description(r));
           row["blocks"] = number(r.blocks); kernel(row, r.first, 1);
           if (!r.cooperative) kernel(row, r.second, 2);
           workspace = checked_add(allocation_bytes(checked_mul(r.blocks, x.c.bins()), sizeof(double)),
@@ -353,14 +354,14 @@ int main(int argc, char** argv) {
             ProfileRange range;
             reduction.execute(*state, stream->value); cuda_check(cudaStreamSynchronize(stream->value));
             result.status = Status::success;
-            row["profiling_status"] = quoted("success");
+            row["profiling_status"] = json_quote("success");
           } else result = reduction.run(*state, output, stream->value);
         };
         if (x.segmented) { SegmentedReduction reduction(x.c); execute(reduction); }
         else { GlobalReduction reduction(x.c, x.layout, x.storage, x.method, x.primitive); execute(reduction); }
         status = result.status;
-        row["reason"] = quoted(result.reason);
-        if (!o.profile_case) row["timing_status"] = quoted(status_name(status));
+        row["reason"] = json_quote(result.reason);
+        if (!o.profile_case) row["timing_status"] = json_quote(status_name(status));
         row["raw_elapsed_ms"] = array(result.raw_elapsed_ms);
         if (result.elapsed_ms) {
           auto samples = result.raw_elapsed_ms;
@@ -388,8 +389,8 @@ int main(int argc, char** argv) {
           }
           for (const auto& p : maxima) row[p.first] = p.second;
           if (!ok) {
-            status = Status::failure; row["validation_status"] = quoted("failure");
-            row["validation_reason"] = quoted("at least one measured repetition failed bin/total norm validation");
+            status = Status::failure; row["validation_status"] = json_quote("failure");
+            row["validation_reason"] = json_quote("at least one measured repetition failed bin/total norm validation");
           }
         }
         if (status == Status::success && !x.segmented && !o.profile_case) {
@@ -400,17 +401,17 @@ int main(int argc, char** argv) {
             auto it = matching.find(key);
             bool ok = it != matching.end() && it->second.size() == output.size();
             if (ok) for (std::size_t b = 0; b < output.size(); ++b)
-              ok &= std::isfinite(output[b]) && std::abs(output[b] - it->second[b]) <= atol + rtol * std::abs(it->second[b]);
-            if (!ok) { status = Status::failure; row["reason"] = quoted("matching two-kernel output missing or mismatched"); }
+              ok &= std::isfinite(output[b]) && std::abs(output[b] - it->second[b]) <= kAbsoluteTolerance + kRelativeTolerance * std::abs(it->second[b]);
+            if (!ok) { status = Status::failure; row["reason"] = json_quote("matching two-kernel output missing or mismatched"); }
           }
         }
         if (result.status == Status::failure) poisoned = true;
       } catch (const Unsupported& e) {
-        status = Status::unsupported; row["timing_status"] = quoted("unsupported"); row["reason"] = quoted(e.what());
+        status = Status::unsupported; row["timing_status"] = json_quote("unsupported"); row["reason"] = json_quote(e.what());
       } catch (const std::exception& e) {
-        status = Status::failure; row["reason"] = quoted(e.what()); poisoned = true;
+        status = Status::failure; row["reason"] = json_quote(e.what()); poisoned = true;
       }
-      row["status"] = quoted(status_name(status));
+      row["status"] = json_quote(status_name(status));
       ++counts[status_name(status)]; failed |= status == Status::failure;
       writer.write(row);
       std::cout << "case " << id << ' ' << status_name(status) << ' ' << row["reason"] << '\n';
