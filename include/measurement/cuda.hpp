@@ -39,6 +39,8 @@ template<class T> class DeviceBuffer {
   Size count_;
 };
 using DeviceState = DeviceBuffer<cuda::std::complex<double>>;
+void preflight_device_bytes(Size bytes);
+Size segmented_workspace_bytes(const Config&);
 DeviceState generate_state(const Config& config);
 std::vector<long double> reference_device_state(const Config& config, const DeviceState& state);
 enum class GlobalLayout { thread_major, bin_major };
@@ -47,6 +49,7 @@ enum class AccumulatorStorage { global, shared, registers };
 const char* storage_name(AccumulatorStorage storage);
 struct KernelResources {
   int registers_per_thread = 0;
+  int binary_version = 0, ptx_version = 0;
   Size local_bytes_per_thread = 0, static_shared_bytes = 0, dynamic_shared_bytes = 0;
   int max_threads = 0, active_blocks_per_sm = 0;
   double theoretical_occupancy = 0;

@@ -54,6 +54,8 @@ const char* status_name(Status status);
 struct Result {
   Status status = Status::not_run;
   std::string reason;
+  std::vector<double> raw_elapsed_ms;
+  std::vector<std::vector<double>> repetition_outputs;
   std::optional<double> elapsed_ms;
   std::optional<double> dram_bytes; // nullopt means unavailable, never an invented zero.
 };

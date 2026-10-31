@@ -243,7 +243,8 @@ Size checked_blocks(const Config& c, AccumulatorStorage storage, ReductionMethod
     ? allocation_bytes(workspace_elements(blocks, Size{c.block_size}, c.bins()), sizeof(double)) : 0;
   bytes = checked_add(bytes, allocation_bytes(checked_mul(blocks, c.bins()), sizeof(double)));
   bytes = checked_add(bytes, allocation_bytes(c.bins(), sizeof(double)));
-  checked_add(bytes, allocation_bytes(c.positions.size(), sizeof(unsigned)));
+  bytes = checked_add(bytes, allocation_bytes(c.positions.size(), sizeof(unsigned)));
+  preflight_device_bytes(bytes);
   return blocks;
 }
 class Event {
@@ -315,6 +316,7 @@ ReductionResources reduction_resources(const Config& c, AccumulatorStorage stora
   const Size dynamic = storage == AccumulatorStorage::shared
     ? allocation_bytes(checked_mul(Size{c.block_size}, c.bins()), sizeof(double)) : 0;
   auto fill = [&](KernelResources& k, const cudaFuncAttributes& a, Size bytes) {
+    k.binary_version = a.binaryVersion; k.ptx_version = a.ptxVersion;
     k.registers_per_thread = a.numRegs; k.local_bytes_per_thread = a.localSizeBytes;
     k.static_shared_bytes = a.sharedSizeBytes; k.dynamic_shared_bytes = bytes;
     k.max_threads = a.maxThreadsPerBlock;
@@ -442,13 +444,26 @@ Result GlobalReduction::run(const DeviceState& state, std::vector<double>& outpu
     Event start, stop;
     output.resize(static_cast<std::size_t>(config_.bins()));
     for (Size i = 0; i < config_.warmups; ++i) execute(state, stream);
-    cuda_check(cudaEventRecord(start.event, stream));
-    for (Size i = 0; i < config_.repetitions; ++i) execute(state, stream);
-    cuda_check(cudaEventRecord(stop.event, stream));
-    cuda_check(cudaEventSynchronize(stop.event));
-    float elapsed;
-    cuda_check(cudaEventElapsedTime(&elapsed, start.event, stop.event));
-    result.elapsed_ms = double(elapsed) / double(config_.repetitions);
+    result.raw_elapsed_ms.reserve(static_cast<std::size_t>(config_.repetitions));
+    result.repetition_outputs.resize(static_cast<std::size_t>(config_.repetitions),
+      std::vector<double>(static_cast<std::size_t>(config_.bins())));
+    double total_ms = 0;
+    for (Size i = 0; i < config_.repetitions; ++i) {
+      cuda_check(cudaEventRecord(start.event, stream));
+      execute(state, stream);
+      cuda_check(cudaEventRecord(stop.event, stream));
+      cuda_check(cudaEventSynchronize(stop.event));
+      float elapsed;
+      cuda_check(cudaEventElapsedTime(&elapsed, start.event, stop.event));
+      result.raw_elapsed_ms.push_back(elapsed);
+      total_ms += elapsed;
+      // Validation-only download is outside the completed event interval.
+      auto& values = result.repetition_outputs[static_cast<std::size_t>(i)];
+      cuda_check(cudaMemcpyAsync(values.data(), output_.data(),
+        allocation_bytes(values.size(), sizeof(double)), cudaMemcpyDeviceToHost, stream));
+      cuda_check(cudaStreamSynchronize(stream));
+    }
+    result.elapsed_ms = total_ms / double(config_.repetitions);
     cuda_check(cudaMemcpyAsync(output.data(), output_.data(),
       allocation_bytes(output_.size(), sizeof(double)), cudaMemcpyDeviceToHost, stream));
     cuda_check(cudaStreamSynchronize(stream));

@@ -1,10 +1,13 @@
 # Quantum measurement reduction
 
-Steps 1–5 implement configuration, deterministic cuRAND input, a bounded CPU
+Steps 1–6 implement configuration, deterministic cuRAND input, a bounded CPU
 reference, and independent two-kernel reductions with per-thread global-memory
 accumulators in thread-major and bin-major layouts, both shared-memory layouts,
 and a fixed-capacity register candidate. The six-step contract is in
 [docs/measurement-reduction-spec.md](docs/measurement-reduction-spec.md).
+Step 6 adds the complete benchmark matrix, per-repetition event timing, full-input
+CPU validation, JSON/CSV output and separate profiling tools; see
+[benchmark commands, result definitions and execution evidence](docs/benchmark.md).
 Step 4 adds gated cooperative kernels. Step 5 adds matched CUB BlockReduce and
 lazy-gather DeviceSegmentedReduce baselines; see [definitions, source audit and
 results](docs/cub-baselines.md).
@@ -207,3 +210,18 @@ lazy gather and segment offsets, including the exclusive N=2^31 endpoint.
 Tests were skipped at the user's request. Added mapping/boundary checks and
 `make test-cub` GPU checks remain unrun. No GPU correctness, resource, timing or
 sanitizer results are claimed, and no full benchmark matrix was run.
+
+
+Step 6 full benchmark (32 GiB input plus active workspace):
+
+```sh
+make benchmark-full BENCHMARK_ARGS='--block-sizes 256 --repetitions 1 --warmups 3'
+```
+
+The default full preset retains all 2424 requested cases, including unsupported
+ones. Results are written to `build/full.json` and `build/full.csv`. Use
+`make benchmark-smoke` for a separately labelled small-input sweep. See the
+[Step 6 guide](docs/benchmark.md) for validation, memory preflight, timing,
+profiling, reproducible builds and limitations. Step 6 tests were skipped as
+requested; `make host` succeeded and `make cuda` was blocked by missing nvcc.
+No full-size run, GPU validation or timing results are available here.

@@ -323,3 +323,14 @@ other versions report unsupported. Baseline definitions, offset/atomic call-path
 evidence, version identification, unsupported cases and unrun validation are in
 [the Step 5 report](cub-baselines.md). Tests were skipped by user instruction;
 no full benchmark matrix was executed.
+
+
+## Step 6: benchmark execution and reporting
+
+The full preset, per-active-workspace memory preflight, raw per-invocation event
+samples, multi-configuration chunked CPU references, fixed-tolerance bin/total
+validation, resource fields and JSON/CSV schema are defined in
+[the benchmark guide](benchmark.md). It also records the exact Make commands,
+separate metric-discovering profiling workflow and actual environment evidence.
+The mathematical and strict atomic contracts above remain unchanged. Tests were
+explicitly skipped for this implementation; CUDA execution remains unverified.

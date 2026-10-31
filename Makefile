@@ -3,7 +3,7 @@
 CXX ?= g++
 NVCC ?= nvcc
 AR ?= ar
-CPPFLAGS += -Iinclude
+CPPFLAGS += -Iinclude -I$(BUILD)
 CXXFLAGS ?= -O2 -Wall -Wextra -Wpedantic
 NVCCFLAGS ?= -O2
 BUILD := build
@@ -38,7 +38,9 @@ $(BUILD)/global_reduction.o: src/global_reduction.cu include/measurement/cuda.hp
 $(BUILD)/cub_reduction.o: src/cub_reduction.cu include/measurement/gather.hpp include/measurement/cuda.hpp include/measurement/core.hpp | $(BUILD)
 	$(NVCC) $(CPPFLAGS) $(NVCCFLAGS) -std=c++17 -MMD -MP -c $< -o $@
 
-$(BUILD)/main.o: src/main.cu include/measurement/cuda.hpp include/measurement/gather.hpp include/measurement/core.hpp | $(BUILD)
+$(CUDA_OBJECT): $(BUILD)/build_info.hpp
+
+$(BUILD)/main.o: src/main.cu $(BUILD)/build_info.hpp include/measurement/cuda.hpp include/measurement/gather.hpp include/measurement/core.hpp | $(BUILD)
 	$(NVCC) $(CPPFLAGS) $(NVCCFLAGS) -std=c++17 -MMD -MP -c $< -o $@
 
 $(BUILD)/measurement_validate: $(BUILD)/main.o $(CUDA_OBJECT) $(BUILD)/libmeasurement_core.a
@@ -75,3 +77,19 @@ clean:
 .PHONY: cuda-evidence
 cuda-evidence:
 	python3 tools/capture_cuda_evidence.py --arch '$(CUDA_ARCH)' --nvcc '$(NVCC)' --flags='$(NVCCFLAGS)'
+
+# Recheck metadata each invocation; only rewrite the header if its content changes.
+.PHONY: FORCE benchmark-smoke benchmark-full profile
+$(BUILD)/build_info.hpp: export MEASUREMENT_NVCC = $(NVCC)
+$(BUILD)/build_info.hpp: export MEASUREMENT_NVCCFLAGS = $(NVCCFLAGS)
+$(BUILD)/build_info.hpp: export MEASUREMENT_CPPFLAGS = $(CPPFLAGS)
+$(BUILD)/build_info.hpp: FORCE | $(BUILD)
+	python3 tools/build_info.py $@
+
+BENCHMARK_ARGS ?=
+benchmark-smoke: cuda
+	./$(BUILD)/measurement_validate --preset smoke --results $(BUILD)/smoke $(BENCHMARK_ARGS)
+benchmark-full: cuda
+	./$(BUILD)/measurement_validate --preset full --results $(BUILD)/full $(BENCHMARK_ARGS)
+profile: cuda
+	python3 tools/profile_benchmark.py --binary $(BUILD)/measurement_validate $(PROFILE_ARGS)

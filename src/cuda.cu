@@ -21,10 +21,19 @@ __global__ void map_draws(const double* draws, cuda::std::complex<double>* state
     state[offset+j] = cuda::std::complex<double>(draws[2*j], draws[2*j+1]);
 }
 }
+void preflight_device_bytes(Size bytes) {
+  std::size_t free_bytes = 0, total_bytes = 0;
+  cuda_check(cudaMemGetInfo(&free_bytes, &total_bytes));
+  if (bytes > free_bytes)
+    throw Unsupported("device memory preflight: additional bytes=" + std::to_string(bytes) +
+      " free bytes=" + std::to_string(free_bytes) + " total bytes=" + std::to_string(total_bytes));
+}
 DeviceState generate_state(const Config& c) {
   c.validate();
   Size n = c.state_size();
   allocation_bytes(n, sizeof(cuda::std::complex<double>));
+  preflight_device_bytes(checked_add(allocation_bytes(n, sizeof(cuda::std::complex<double>)),
+    allocation_bytes(checked_mul(std::min(n, generation_chunk), Size{2}), sizeof(double))));
   DeviceState state(n);
   DeviceBuffer<double> draws(checked_mul(std::min(n, generation_chunk), Size{2}));
   Generator generator;

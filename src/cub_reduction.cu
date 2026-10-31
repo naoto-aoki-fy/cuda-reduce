@@ -56,8 +56,19 @@ struct Event {
   Event(const Event&) = delete;
 };
 }
+Size segmented_workspace_bytes(const Config& c) {
+  supported_config(c);
+  GatherMap map(c);
+  std::size_t bytes = 0;
+  cuda_check(sum(c, map, nullptr, nullptr, nullptr, bytes, nullptr));
+  return checked_add(allocation_bytes(c.bins(), sizeof(double)), std::max(std::size_t{1}, bytes));
+}
+Config preflight_segmented(const Config& c) {
+  preflight_device_bytes(segmented_workspace_bytes(c));
+  return c;
+}
 SegmentedReduction::SegmentedReduction(const Config& c)
-  : config_(supported_config(c)), map_(config_), output_(config_.bins()) {
+  : config_(preflight_segmented(c)), map_(config_), output_(config_.bins()) {
   // Query performs no input reads; state is supplied only during execution.
   cuda_check(sum(config_, map_, nullptr, output_.data(), nullptr, temporary_bytes_, nullptr));
   temporary_ = std::make_unique<DeviceBuffer<unsigned char>>(std::max(std::size_t{1}, temporary_bytes_));
@@ -73,13 +84,26 @@ Result SegmentedReduction::run(const DeviceState& state, std::vector<double>& ou
     Event start, stop;
     output.resize(config_.bins());
     for (Size i = 0; i < config_.warmups; ++i) execute(state, stream);
-    cuda_check(cudaEventRecord(start.value, stream));
-    for (Size i = 0; i < config_.repetitions; ++i) execute(state, stream);
-    cuda_check(cudaEventRecord(stop.value, stream));
-    cuda_check(cudaEventSynchronize(stop.value));
-    float elapsed;
-    cuda_check(cudaEventElapsedTime(&elapsed, start.value, stop.value));
-    result.elapsed_ms = double(elapsed) / double(config_.repetitions);
+    result.raw_elapsed_ms.reserve(static_cast<std::size_t>(config_.repetitions));
+    result.repetition_outputs.resize(static_cast<std::size_t>(config_.repetitions),
+      std::vector<double>(static_cast<std::size_t>(config_.bins())));
+    double total_ms = 0;
+    for (Size i = 0; i < config_.repetitions; ++i) {
+      cuda_check(cudaEventRecord(start.value, stream));
+      execute(state, stream);
+      cuda_check(cudaEventRecord(stop.value, stream));
+      cuda_check(cudaEventSynchronize(stop.value));
+      float elapsed;
+      cuda_check(cudaEventElapsedTime(&elapsed, start.value, stop.value));
+      result.raw_elapsed_ms.push_back(elapsed);
+      total_ms += elapsed;
+      // Validation-only download is outside the completed event interval.
+      auto& values = result.repetition_outputs[static_cast<std::size_t>(i)];
+      cuda_check(cudaMemcpyAsync(values.data(), output_.data(),
+        allocation_bytes(values.size(), sizeof(double)), cudaMemcpyDeviceToHost, stream));
+      cuda_check(cudaStreamSynchronize(stream));
+    }
+    result.elapsed_ms = total_ms / double(config_.repetitions);
     cuda_check(cudaMemcpyAsync(output.data(), output_.data(), allocation_bytes(output_.size(), sizeof(double)),
       cudaMemcpyDeviceToHost, stream));
     cuda_check(cudaStreamSynchronize(stream));
