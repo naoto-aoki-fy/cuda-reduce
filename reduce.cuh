@@ -62,7 +62,7 @@ template<class InputT,class AccT,class Op> __global__ void cooperative_kernel(co
  PartialReader<AccT> r{partial,k,p};
  for(uint64_t t=blockIdx.x;t<tiles;) { reduce_tile<AccT>(r,out,t,k,shared); if(tiles-t<=gridDim.x) break; t+=gridDim.x; }
 }
-template<class InputT,class AccT,class Op> Status make_plan(uint64_t n,uint64_t k,Mode mode,Plan& plan,cudaError_t* error=nullptr,unsigned sm_multiplier=4) {
+template<class InputT,class AccT,class Op> Status make_plan(uint64_t n,uint64_t k,Mode mode,Plan& plan,cudaError_t* error=nullptr,unsigned sm_multiplier=8) {
  plan=Plan{}; plan.n=n; plan.k=k; plan.mode=mode; if(error) *error=cudaSuccess;
  if(!sm_multiplier) return Status::invalid_argument;
  if(!k) return Status::success;

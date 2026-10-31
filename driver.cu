@@ -23,7 +23,7 @@ template<class T> long double real_part(T x) { return static_cast<long double>(x
 template<> long double real_part(C x) { return x.real(); }
 template<class T> long double imag_part(T) { return 0; }
 template<> long double imag_part(C x) { return x.imag(); }
-template<class Input,class Acc,class Op> void check_case(uint64_t n,uint64_t k,Op op,unsigned sm_multiplier=4) {
+template<class Input,class Acc,class Op> void check_case(uint64_t n,uint64_t k,Op op,unsigned sm_multiplier=8) {
  using namespace column_reduce;
  Input* di=nullptr; Acc* dout=nullptr; void* ws=nullptr; cudaStream_t stream; CUDA(cudaStreamCreate(&stream));
  size_t count=static_cast<size_t>(n*k); std::vector<Input> h(count); std::vector<Acc> out(k); std::vector<long double> ref_re(k),ref_im(k),scale(k);
@@ -111,7 +111,7 @@ void benchmark() {
  int device,runtime,driver; cudaDeviceProp prop{}; CUDA(cudaGetDevice(&device)); CUDA(cudaGetDeviceProperties(&prop,device)); CUDA(cudaRuntimeGetVersion(&runtime)); CUDA(cudaDriverGetVersion(&driver));
  printf("# GPU: %s; CUDA runtime: %d; driver: %d; nvcc: %d.%d.%d; CUB: %d\n",prop.name,runtime,driver,__CUDACC_VER_MAJOR__,__CUDACC_VER_MINOR__,__CUDACC_VER_BUILD__,CUB_VERSION);
  puts("# Input=complex<double>, accumulator=double, transform=norm; bandwidth is input-effective GB/s");
- printf("# SMs: %d; sm_multiplier: 4; target first-stage blocks: %llu; blocks column reports the first stage\n",prop.multiProcessorCount,(unsigned long long)prop.multiProcessorCount*4);
+ printf("# SMs: %d; sm_multiplier: 8; target first-stage blocks: %llu; blocks column reports the first stage\n",prop.multiProcessorCount,(unsigned long long)prop.multiProcessorCount*8);
  puts("N,K,input_bytes,implementation,status,latency_us,input_GB_s,workspace_bytes,cub_calls,blocks,block_size,partitions,speedup_vs_cub_segmented,speedup_vs_cub_per_channel");
  cudaStream_t stream; CUDA(cudaStreamCreate(&stream));
  const char* names[]={"custom_two_kernel","custom_cooperative","cub_segmented","cub_per_channel"};
@@ -152,7 +152,7 @@ __global__ void initialize_fixed(C* input, uint64_t count) {
 
 struct FixedOptions {
  uint64_t max_cub_k=32;
- unsigned sm_multiplier=4;
+ unsigned sm_multiplier=8;
  int max_reps=3;
  double target_ms=0, budget_seconds=0;
  bool quick=false;
