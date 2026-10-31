@@ -12,11 +12,14 @@ nvidia-smi
 make ARCH=sm_80
 ./reduce_demo test
 ./reduce_demo bench
+./reduce_demo bench-fixed  # fixed 2^30 elements, K = 1..1024
 compute-sanitizer --tool memcheck ./reduce_demo test-quick
 compute-sanitizer --tool synccheck ./reduce_demo test-quick
 ```
 
 No GPU, compiler version or benchmark results are assumed. The driver prints the runtime, driver, compiler and GPU versions. The benchmark times whole operations in one stream using preallocated memory, five warmups and 50 event-timed repetitions, excluding transfers and allocation. It reports each method in a separate CSV row, including workspace size and the custom configurations. Bandwidth uses input bytes only and is not measured DRAM traffic. Unsupported cooperative execution is reported as skipped with `N/A` values. CUB comes from the installed CUDA Toolkit/CCCL; it is not vendored.
+
+The `bench-fixed` mode targets large-memory GPUs such as GB200 and sweeps powers of two from K=1 through 1024 with N*K fixed at 2^30. It initializes and reuses one 16 GiB device input buffer; no host-sized copy is allocated. Each implementation uses its own temporary workspace, runs the same warmups and event timing as `bench`, and checks every output against the known constant-input sum. Allocation, planning, and launch failures produce `skipped` rows with diagnostics on stderr, so other cases can continue; a correctness mismatch produces a `failed` row and a nonzero exit status. The per-channel timing includes all K CUB reductions. The standard `bench` mode is unchanged.
 
 ## Usage
 

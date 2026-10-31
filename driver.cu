@@ -81,4 +81,90 @@ void benchmark() {
  }
  CUDA(cudaStreamDestroy(stream));
 }
-int main(int argc,char** argv) { if(argc!=2) { fprintf(stderr,"usage: %s test|test-quick|bench\n",argv[0]); return 2; } std::string mode=argv[1]; if(mode=="test") tests(false); else if(mode=="test-quick") tests(true); else if(mode=="bench") benchmark(); else return 2; }
+// Initialize once on the device so the fixed-size sweep needs no host input copy.
+__global__ void initialize_fixed(C* input, uint64_t count) {
+ uint64_t i=uint64_t(blockIdx.x)*blockDim.x+threadIdx.x;
+ uint64_t stride=uint64_t(blockDim.x)*gridDim.x;
+ for(;i<count;i+=stride) input[i]=C(0.5,0.25);
+}
+
+bool benchmark_fixed() {
+ using namespace column_reduce;
+ constexpr uint64_t count=uint64_t(1)<<30;
+ const size_t input_bytes=static_cast<size_t>(count)*sizeof(C);
+ const char* names[]={"custom_two_kernel","custom_cooperative","cub_segmented","cub_per_channel"};
+ int device,runtime,driver; cudaDeviceProp prop{};
+ CUDA(cudaGetDevice(&device)); CUDA(cudaGetDeviceProperties(&prop,device)); CUDA(cudaRuntimeGetVersion(&runtime)); CUDA(cudaDriverGetVersion(&driver));
+ printf("# GPU: %s; CUDA runtime: %d; driver: %d; nvcc: %d.%d.%d; CUB: %d\n",prop.name,runtime,driver,__CUDACC_VER_MAJOR__,__CUDACC_VER_MINOR__,__CUDACC_VER_BUILD__,CUB_VERSION);
+ puts("# Input=complex<double>, accumulator=double, transform=norm; bandwidth is input-effective GB/s");
+ puts("N,K,input_bytes,implementation,status,latency_us,input_GB_s,workspace_bytes,cub_calls,blocks,block_size,partitions,speedup_vs_cub_segmented,speedup_vs_cub_per_channel");
+ cudaStream_t stream; CUDA(cudaStreamCreate(&stream));
+ bool all_correct=true;
+ C* in=nullptr; double* out=nullptr;
+ cudaError_t setup=cudaMalloc(&in,input_bytes);
+ if(setup==cudaSuccess) setup=cudaMalloc(&out,1024*sizeof(double));
+ if(setup==cudaSuccess) {
+  initialize_fixed<<<std::min(65535,prop.maxGridSize[0]),256,0,stream>>>(in,count);
+  setup=cudaGetLastError();
+  if(setup==cudaSuccess) setup=cudaStreamSynchronize(stream);
+ }
+ if(setup!=cudaSuccess) fprintf(stderr,"fixed sweep input setup: %s\n",cudaGetErrorString(setup));
+ for(uint64_t k=1;k<=1024;k*=2) {
+  uint64_t n=count/k; Plan p[2]; cub_baseline::Plan cp[2]; bool ready[4]={}, failed[4]={}; double us[4]={};
+  if(setup==cudaSuccess) {
+   for(int m=0;m<2;++m) {
+    cudaError_t err=cudaSuccess;
+    auto status=make_plan<C,double,Norm>(n,k,m?Mode::cooperative:Mode::two_kernel,p[m],&err);
+    ready[m]=status==Status::success;
+    if(!ready[m]) fprintf(stderr,"N=%llu K=%llu %s: %s (%s)\n",(unsigned long long)n,(unsigned long long)k,names[m],status_string(status),cudaGetErrorString(err));
+   }
+   for(int m=0;m<2;++m) {
+    cudaError_t err=cub_baseline::make_plan(n,k,m?cub_baseline::Mode::per_channel:cub_baseline::Mode::segmented,in,out,Norm{},stream,cp[m]);
+    ready[m+2]=err==cudaSuccess;
+    if(err!=cudaSuccess) fprintf(stderr,"N=%llu K=%llu %s planning: %s\n",(unsigned long long)n,(unsigned long long)k,names[m+2],cudaGetErrorString(err));
+   }
+   for(int m=0;m<4;++m) {
+    if(!ready[m]) continue;
+    size_t bytes=m<2?p[m].workspace_bytes:cp[m-2].workspace_bytes;
+    void* ws=nullptr; cudaError_t err=cudaMalloc(&ws,std::max<size_t>(bytes,1));
+    auto run=[&]() -> cudaError_t {
+     if(m<2) { cudaError_t e=cudaSuccess; auto status=execute(p[m],in,out,Norm{},stream,ws,bytes,&e); return status==Status::success?cudaSuccess:(e==cudaSuccess?cudaErrorInvalidValue:e); }
+     return cub_baseline::execute(cp[m-2],in,out,Norm{},stream,ws,bytes);
+    };
+    for(int i=0;i<5 && err==cudaSuccess;++i) err=run();
+    cudaEvent_t start=nullptr,end=nullptr;
+    if(err==cudaSuccess) err=cudaEventCreate(&start);
+    if(err==cudaSuccess) err=cudaEventCreate(&end);
+    if(err==cudaSuccess) err=cudaEventRecord(start,stream);
+    for(int i=0;i<50 && err==cudaSuccess;++i) err=run();
+    if(err==cudaSuccess) err=cudaEventRecord(end,stream);
+    if(err==cudaSuccess) err=cudaEventSynchronize(end);
+    float ms=0;
+    if(err==cudaSuccess) err=cudaEventElapsedTime(&ms,start,end);
+    // The constant input has an exactly representable norm and reference sum.
+    std::vector<double> result(k);
+    if(err==cudaSuccess) err=cudaMemcpyAsync(result.data(),out,k*sizeof(double),cudaMemcpyDeviceToHost,stream);
+    if(err==cudaSuccess) err=cudaStreamSynchronize(stream);
+    bool correct=err==cudaSuccess;
+    if(correct) for(double x:result) if(!std::isfinite(x) || std::abs(x-double(n)*0.3125)>1e-12*(1+double(n)*0.3125)) { correct=false; break; }
+    if(err!=cudaSuccess) fprintf(stderr,"N=%llu K=%llu %s: %s\n",(unsigned long long)n,(unsigned long long)k,names[m],cudaGetErrorString(err));
+    else if(!correct) { fprintf(stderr,"N=%llu K=%llu %s: correctness check failed\n",(unsigned long long)n,(unsigned long long)k,names[m]); failed[m]=true; all_correct=false; }
+    if(correct) us[m]=ms*1000/50;
+    else ready[m]=false;
+    if(start) cudaEventDestroy(start); if(end) cudaEventDestroy(end);
+    if(ws) cudaFree(ws);
+   }
+  }
+  for(int m=0;m<4;++m) {
+   printf("%llu,%llu,%zu,%s,",(unsigned long long)n,(unsigned long long)k,input_bytes,names[m]);
+   if(!us[m]) { puts(failed[m]?"failed,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A":"skipped,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A"); continue; }
+   printf("ok,%.3f,%.3f,%zu,",us[m],input_bytes/us[m]/1000,m<2?p[m].workspace_bytes:cp[m-2].workspace_bytes);
+   if(m<2) printf("0,%u,%u,%llu,",p[m].blocks,block_size,(unsigned long long)p[m].partitions); else printf("%llu,N/A,N/A,N/A,",(unsigned long long)(m==2?1:k));
+   if(m<2 && us[2]) printf("%.3f,",us[2]/us[m]); else printf("N/A,");
+   if(m<2 && us[3]) printf("%.3f\n",us[3]/us[m]); else puts("N/A");
+  }
+ }
+ if(in) cudaFree(in); if(out) cudaFree(out); CUDA(cudaStreamDestroy(stream));
+ return all_correct;
+}
+int main(int argc,char** argv) { if(argc!=2) { fprintf(stderr,"usage: %s test|test-quick|bench|bench-fixed\n",argv[0]); return 2; } std::string mode=argv[1]; if(mode=="test") tests(false); else if(mode=="test-quick") tests(true); else if(mode=="bench") benchmark(); else if(mode=="bench-fixed") return benchmark_fixed()?0:1; else return 2; }
