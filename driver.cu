@@ -122,7 +122,7 @@ void tests(bool quick) {
  const uint64_t ks[]={0,1,2,3,4,5,7,16,31,32,33,65,257}; const uint64_t ns[]={0,1,7,259,4097};
  for(auto k:ks) for(auto n:ns) { if(quick && n>259) continue; check_case<double,double>(n,k,Identity{}); check_case<float,double>(n,k,Identity{}); check_case<C,double>(n,k,Norm{}); check_case<C,C>(n,k,Identity{}); check_case<double,double>(n,k,Shift{2.5}); }
  // Exercise exact and uneven row splits around the 256-thread boundary.
- for(uint64_t n:{uint64_t(255),uint64_t(256),uint64_t(257),uint64_t(511),uint64_t(512),uint64_t(513),uint64_t(769)}) for(uint64_t k:{uint64_t(1),uint64_t(2)}) {
+ for(uint64_t n:{uint64_t(255),uint64_t(256),uint64_t(257),uint64_t(511),uint64_t(512),uint64_t(513),uint64_t(769)}) for(uint64_t k:{uint64_t(1),uint64_t(2),uint64_t(4)}) {
   check_case<double,double>(n,k,Shift{2.5});
   check_case<float,double>(n,k,Identity{});
   check_case<C,double>(n,k,Norm{});
@@ -130,8 +130,12 @@ void tests(bool quick) {
  }
  for(unsigned multiplier:{1u,4u,7u}) {
   check_case<double,double>(8193,1,Shift{2.5},multiplier);
-  if(!quick) for(uint64_t k:{uint64_t(1),uint64_t(3),uint64_t(33)}) {
-   uint64_t n=k<=3?(uint64_t(1)<<20)+13:65549;
+  for(uint64_t k:{uint64_t(2),uint64_t(4)}) {
+   check_case<double,double>(8193,k,Shift{2.5},multiplier);
+   check_case<C,C>(8193,k,Identity{},multiplier);
+  }
+  if(!quick) for(uint64_t k:{uint64_t(1),uint64_t(2),uint64_t(3),uint64_t(4),uint64_t(33)}) {
+   uint64_t n=k<=4?(uint64_t(1)<<20)+13:65549;
    check_case<double,double>(n,k,Shift{2.5},multiplier);
    check_case<C,C>(n,k,Identity{},multiplier);
   }

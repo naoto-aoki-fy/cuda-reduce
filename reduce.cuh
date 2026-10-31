@@ -39,6 +39,13 @@ template<class InputT,class AccT,class Op> struct ContiguousInputReader {
  __device__ uint64_t start(uint64_t r) const { return r; }
  __device__ uint64_t step(uint64_t rows) const { return rows; }
 };
+template<class InputT,class AccT,class Op> struct ContiguousColumnReader {
+ const InputT* input; RowRange range; uint64_t k; Op op;
+ __device__ AccT read(uint64_t row,uint64_t c) const { return static_cast<AccT>(op(input[(range.begin+row)*k+c])); }
+ __device__ uint64_t count() const { return range.length; }
+ __device__ uint64_t start(uint64_t r) const { return r; }
+ __device__ uint64_t step(uint64_t rows) const { return rows; }
+};
 template<class AccT> struct PartialReader {
  const AccT* data; uint64_t k,partitions;
  __device__ AccT read(uint64_t row,uint64_t c) const { return data[row*k+c]; }
@@ -65,6 +72,9 @@ template<class InputT,class AccT,class Op> __device__ void reduce_input_tile(con
  // The branch is uniform across the block; both readers use the same barriers.
  if(k==1) {
   ContiguousInputReader<InputT,AccT,Op> r{in,contiguous_rows(n,part,p),op};
+  reduce_tile<AccT>(r,partial+part*k,tile,k,shared);
+ } else if(k==2 || k==4) {
+  ContiguousColumnReader<InputT,AccT,Op> r{in,contiguous_rows(n,part,p),k,op};
   reduce_tile<AccT>(r,partial+part*k,tile,k,shared);
  } else {
   InputReader<InputT,AccT,Op> r{in,n,k,part,p,op};
