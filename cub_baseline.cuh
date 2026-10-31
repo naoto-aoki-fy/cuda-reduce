@@ -1,6 +1,8 @@
 #pragma once
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/iterator/transform_iterator.h>
 #include <cstdint>
 #include <climits>
 #include <limits>
@@ -29,12 +31,12 @@ template<class Acc> struct Add {
 
 template<class Input,class Acc,class Op>
 cudaError_t invoke(const Plan& p,const Input* input,Acc* output,Op op,cudaStream_t stream,void* workspace,size_t& bytes) {
- using Count = cub::CountingInputIterator<int>;
- using Values = cub::TransformInputIterator<Acc,Read<Input,Acc,Op>,Count>;
+ using Count = thrust::counting_iterator<int>;
+ using Values = thrust::transform_iterator<Read<Input,Acc,Op>,Count,Acc>;
  Count count(0);
  if(p.mode==Mode::segmented) {
   Values values(count,Read<Input,Acc,Op>{input,p.n,p.k,0,op,true});
-  using Offsets = cub::TransformInputIterator<int,Offset,Count>;
+  using Offsets = thrust::transform_iterator<Offset,Count,int>;
   Offsets offsets(count,Offset{p.n});
   return cub::DeviceSegmentedReduce::Reduce(workspace,bytes,values,output,static_cast<int>(p.k),offsets,offsets+1,Add<Acc>{},Acc{},stream);
  }
