@@ -4,7 +4,7 @@
 
 ## Build and run
 
-Install a CUDA toolkit with libcu++ and a compatible NVIDIA driver/GPU. Select an architecture supported by **your installed nvcc**: A100 `sm_80`, H100 `sm_90`, B200 `sm_100` (requires a sufficiently recent toolkit). The default is `sm_80`.
+Install a CUDA toolkit with libcu++ and a compatible NVIDIA driver/GPU. Select an architecture supported by **your installed nvcc**: A100 `sm_80`, H100 `sm_90`, B200 `sm_100` (requires a sufficiently recent toolkit). The default is `sm_100`.
 
 ```sh
 nvcc --version
@@ -16,7 +16,7 @@ compute-sanitizer --tool memcheck ./reduce_demo test-quick
 compute-sanitizer --tool synccheck ./reduce_demo test-quick
 ```
 
-No GPU, compiler version or benchmark results are assumed. The driver prints the runtime, driver, compiler and GPU versions. The benchmark times whole operations in one stream using preallocated memory, five warmups and 50 event-timed repetitions, excluding transfers and allocation. It prints both configurations and the ratio of two-kernel time to cooperative time. Its bandwidth uses input bytes only and is not measured DRAM traffic. The logical partitions match; physical grid sizes can differ. Unsupported cooperative execution is reported in the test/benchmark output as skipped (benchmark values are zero).
+No GPU, compiler version or benchmark results are assumed. The driver prints the runtime, driver, compiler and GPU versions. The benchmark times whole operations in one stream using preallocated memory, five warmups and 50 event-timed repetitions, excluding transfers and allocation. It reports each method in a separate CSV row, including workspace size and the custom configurations. Bandwidth uses input bytes only and is not measured DRAM traffic. Unsupported cooperative execution is reported as skipped with `N/A` values. CUB comes from the installed CUDA Toolkit/CCCL; it is not vendored.
 
 ## Usage
 
@@ -50,3 +50,21 @@ Each thread accumulates in registers using a row grid-stride loop. Shuffle steps
 The workspace contains `P*K` accumulator values in `[partition][channel]` order, with `P = max(1, min(32, ceil(N/256)))`. Blocks grid-stride over `ceil(K/32)*P` tasks, so each partial is written on every call, including empty rows. The second phase reads these partials directly and grid-strides over channel tiles. Two-kernel mode always launches both kernels for K>0. Cooperative mode uses the same phases in one kernel, with one unconditional grid synchronization between them. Its one-dimensional physical grid is limited by occupancy of the instantiated kernel and the device multiprocessor count; both modes use zero dynamic shared memory. No atomics are used. Fixed configurations give fixed reduction grouping, but floating point results need not match sequential sums, other configurations, or other architectures bitwise.
 
 Tests compare against long-double CPU accumulation of the transformed values, with an absolute tolerance of `1e-12 * (1 + sum(abs(transformed values)))`, accounting for cancellation and different summation orders. They include nonzero-at-zero transforms, irregular tails, channel-specific values, alternating signs, and repeated workspace use.
+
+## CUB comparison baselines
+
+`cub_baseline.cuh` adds two device-wide CUB reductions without changing `reduce.cuh`. Both fuse the transform and conversion to the accumulator type into a virtual input iterator, and use an explicit addition and zero initializer, including for complex accumulators. The segmented baseline makes a virtual column-major view: index `j` reads row `j % N`, channel `j / N` from the original row-major input. Iterator-generated offsets delimit each channel, so no transpose, transformed array, or offset array is allocated. One `DeviceSegmentedReduce::Reduce` call produces all channels. The per-channel baseline uses a strided iterator and calls `DeviceReduce::Reduce` once per channel on the same stream and workspace. Empty rows are handled by asynchronously zeroing the output; zero channels are a no-op.
+
+Planning queries CUB workspace size with the actual input/output pointers and stream; allocate that workspace before execution and keep the plan, buffers, and transform types consistent. Execution performs no allocation or host synchronization. Workspace, input, and output must remain valid until the stream completes, and simultaneous operations need separate workspace and output or stream ordering. The adapters conservatively limit `N`, `K`, and `N*K` to `INT_MAX` for compatibility with CUB's integer iterator/count interfaces; larger cases return `cudaErrorInvalidValue`. The CUDA Toolkit must provide CUB and libcu++.
+
+The custom kernels map threads over tiles of interleaved channels. The segmented virtual view instead causes strided physical reads, and its segment count affects available parallelism. The per-channel method also reads strided data and performs K separate reductions, potentially increasing launch overhead. CUB selects internal policies according to device, type, problem size, and CCCL version. These are complete algorithms for the same operation, not isolated measurements of CUB's warp reduction. Differences can reflect coalescing, launch counts, and parallelism as well as arithmetic; a slower segmented result does not establish that CUB device-wide reduction is inherently slower.
+
+The benchmark prints GPU, CUDA and CUB versions as comment lines, then long-format CSV. `cub_calls` counts CUB API invocations per complete operation. Speedup is CUB latency divided by custom latency; values above one favor the custom method. Speedups appear on custom rows, and `N/A` denotes an inapplicable or skipped value. For example, with placeholders rather than measurements:
+
+```text
+N,K,input_bytes,implementation,status,latency_us,input_GB_s,workspace_bytes,cub_calls,blocks,block_size,partitions,speedup_vs_cub_segmented,speedup_vs_cub_per_channel
+64,2,2048,custom_two_kernel,ok,<us>,<GB/s>,<bytes>,0,<blocks>,256,<partitions>,<ratio>,<ratio>
+64,2,2048,custom_cooperative,skipped,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A
+64,2,2048,cub_segmented,ok,<us>,<GB/s>,<bytes>,1,N/A,N/A,N/A,N/A,N/A
+64,2,2048,cub_per_channel,ok,<us>,<GB/s>,<bytes>,2,N/A,N/A,N/A,N/A,N/A
+```

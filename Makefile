@@ -5,7 +5,7 @@ NVCCFLAGS ?= -O3 -std=c++17 -lineinfo
 
 all: reduce_demo
 
-reduce_demo: driver.cu reduce.cuh
+reduce_demo: driver.cu reduce.cuh cub_baseline.cuh
 	$(NVCC) $(NVCCFLAGS) -arch=$(ARCH) driver.cu -o $@
 
 clean:
