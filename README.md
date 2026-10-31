@@ -231,3 +231,18 @@ ones. Results are written to `build/full.json` and `build/full.csv`. Use
 profiling, reproducible builds and limitations. Step 6 tests were skipped as
 requested; `make host` succeeded and `make cuda` was blocked by missing nvcc.
 No full-size run, GPU validation or timing results are available here.
+
+Run the existing smoke benchmark matrix sequentially for every qubit count
+from 9 through 16:
+
+```sh
+make benchmark-qubits-9-16
+# Optional benchmark settings apply to each qubit count:
+make benchmark-qubits-9-16 BENCHMARK_ARGS='--block-sizes 128,256,512 --repetitions 5 --warmups 3'
+```
+
+Each run preserves the existing methods, storage types, layouts, measurement
+configurations and tuning defaults. Results are saved separately as
+`build/qubits-9.json` and `build/qubits-9.csv` through `build/qubits-16.json`
+and `build/qubits-16.csv`. This target owns the preset, qubit count and result
+prefix; other benchmark options pass through `BENCHMARK_ARGS`.

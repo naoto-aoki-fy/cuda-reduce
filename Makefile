@@ -79,7 +79,7 @@ cuda-evidence:
 	python3 tools/capture_cuda_evidence.py --arch '$(CUDA_ARCH)' --nvcc '$(NVCC)' --flags='$(NVCCFLAGS)'
 
 # Recheck metadata each invocation; only rewrite the header if its content changes.
-.PHONY: FORCE benchmark-smoke benchmark-full profile
+.PHONY: FORCE benchmark-smoke benchmark-full benchmark-qubits-9-16 profile
 $(BUILD)/build_info.hpp: export MEASUREMENT_NVCC = $(NVCC)
 $(BUILD)/build_info.hpp: export MEASUREMENT_NVCCFLAGS = $(NVCCFLAGS)
 $(BUILD)/build_info.hpp: export MEASUREMENT_CPPFLAGS = $(CPPFLAGS)
@@ -91,5 +91,9 @@ benchmark-smoke: cuda
 	./$(BUILD)/measurement_validate --preset smoke --results $(BUILD)/smoke $(BENCHMARK_ARGS)
 benchmark-full: cuda
 	./$(BUILD)/measurement_validate --preset full --results $(BUILD)/full $(BENCHMARK_ARGS)
+benchmark-qubits-9-16: cuda
+	@set -e; for qubits in 9 10 11 12 13 14 15 16; do \
+		./$(BUILD)/measurement_validate $(BENCHMARK_ARGS) --preset smoke --qubits $$qubits --results $(BUILD)/qubits-$$qubits; \
+	done
 profile: cuda
 	python3 tools/profile_benchmark.py --binary $(BUILD)/measurement_validate $(PROFILE_ARGS)
