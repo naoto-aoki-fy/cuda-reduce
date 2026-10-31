@@ -17,9 +17,22 @@ compute-sanitizer --tool memcheck ./reduce_demo test-quick
 compute-sanitizer --tool synccheck ./reduce_demo test-quick
 ```
 
-No GPU, compiler version or benchmark results are assumed. The driver prints the runtime, driver, compiler and GPU versions. The benchmark times whole operations in one stream using preallocated memory, five warmups and 50 event-timed repetitions, excluding transfers and allocation. It reports each method in a separate CSV row, including workspace size and the custom configurations. Bandwidth uses input bytes only and is not measured DRAM traffic. Unsupported cooperative execution is reported as skipped with `N/A` values. CUB comes from the installed CUDA Toolkit/CCCL; it is not vendored.
+No GPU, compiler version or benchmark results are assumed. CUB comes from the installed CUDA Toolkit/CCCL; it is not vendored. The standard `bench` mode uses five warmups and 50 event-timed repetitions.
 
-The `bench-fixed` mode targets large-memory GPUs such as GB200 and sweeps powers of two from K=1 through 1024 with N*K fixed at 2^30. It initializes and reuses one 16 GiB device input buffer; no host-sized copy is allocated. Each implementation uses its own temporary workspace, runs the same warmups and event timing as `bench`, and checks every output against the known constant-input sum. Allocation, planning, and launch failures produce `skipped` rows with diagnostics on stderr, so other cases can continue; a correctness mismatch produces a `failed` row and a nonzero exit status. The per-channel timing includes all K CUB reductions. The standard `bench` mode is unchanged.
+`bench-fixed` sweeps K=1 through 1024 with N*K fixed at 2^30 complex elements (16 GiB). It initializes one device input and reuses it for every implementation. Allocation, planning, initialization, and correctness checks are outside the timed region. Each invocation is timed with CUDA events in the same stream, and synchronized before the next invocation. Bandwidth is input bytes divided by elapsed time, not measured DRAM traffic.
+
+By default each configuration gets one warmup and three timed repetitions. The per-channel CUB baseline is skipped for K > 32 because it launches K reductions per invocation; the other implementations run where supported. Planning, allocation, execution, and correctness errors are reported as `failed`, while policy and unsupported cooperative configurations are `skipped`. Failures produce a nonzero exit status. Every row includes a reason for failures or skips and the actual timed repetition count. Progress and device information go to stderr; stdout is CSV, flushed after each row. CUB baselines run first so custom rows can include speedups; an unavailable baseline produces `N/A`.
+
+```sh
+./reduce_demo bench-fixed --quick                     # 2^24 elements, no warmup, one repetition
+./reduce_demo bench-fixed --max-cub-k 1024            # run all K values for every supported method
+./reduce_demo bench-fixed --max-reps 10 --target-ms 500
+./reduce_demo bench-fixed --budget-seconds 120 > results.csv
+```
+
+`--max-cub-k K` accepts 1 through 1024; `--max-reps N` sets the maximum timed invocations (default 3, or 1 in quick mode unless explicitly set). With `--target-ms`, measurement stops after the cumulative CUDA event time reaches the target or the maximum count is reached. Without it, the maximum count is used. Counts can differ between implementations; latency is the mean per invocation. `--budget-seconds` is a wall-clock budget beginning before device setup. It is checked between synchronized invocations and configurations; a running invocation is allowed to finish, and a partially measured configuration is reported with its actual count. Remaining configurations are skipped. The budget is therefore not a hard deadline, especially during initialization or an individual slow invocation. Quick mode reduces the input to 2^24 elements (256 MiB), so its results are not directly comparable to the normal fixed-size sweep.
+
+The per-channel CUB launch count is not the only potential cost: the custom first phase is limited to 32 partitions per channel tile, so K=1 uses only 32 blocks to process the entire 16 GiB input. At large K, both CUB baselines use strided reads, which can reduce memory coalescing. These are structural observations; actual performance depends on the GPU and toolkit.
 
 ## Usage
 

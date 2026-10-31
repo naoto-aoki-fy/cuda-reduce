@@ -7,6 +7,9 @@
 #include <type_traits>
 #include <algorithm>
 #include <string>
+#include <chrono>
+#include <cerrno>
+#include <climits>
 using C = cuda::std::complex<double>;
 #define CUDA(x) do { cudaError_t e_=(x); if(e_!=cudaSuccess) { fprintf(stderr,"%s:%d: %s\n",__FILE__,__LINE__,cudaGetErrorString(e_)); exit(1); } } while(0)
 struct Identity { template<class T> __host__ __device__ T operator()(T x) const { return x; } };
@@ -88,18 +91,33 @@ __global__ void initialize_fixed(C* input, uint64_t count) {
  for(;i<count;i+=stride) input[i]=C(0.5,0.25);
 }
 
-bool benchmark_fixed() {
+struct FixedOptions {
+ uint64_t max_cub_k=32;
+ int max_reps=3;
+ double target_ms=0, budget_seconds=0;
+ bool quick=false;
+};
+
+bool benchmark_fixed(const FixedOptions& opt) {
  using namespace column_reduce;
- constexpr uint64_t count=uint64_t(1)<<30;
+ // Quick mode keeps the same sweep, with a smaller input and one repetition by default.
+ const uint64_t count=uint64_t(1)<<(opt.quick?24:30);
  const size_t input_bytes=static_cast<size_t>(count)*sizeof(C);
  const char* names[]={"custom_two_kernel","custom_cooperative","cub_segmented","cub_per_channel"};
+ const int order[]={2,3,0,1}; // Baselines must be available when each custom row is emitted.
+ const int warmups=opt.quick?0:1;
+ auto begin=std::chrono::steady_clock::now();
+ auto budget_expired=[&]() { return opt.budget_seconds>0 && std::chrono::duration<double>(std::chrono::steady_clock::now()-begin).count()>=opt.budget_seconds; };
  int device,runtime,driver; cudaDeviceProp prop{};
  CUDA(cudaGetDevice(&device)); CUDA(cudaGetDeviceProperties(&prop,device)); CUDA(cudaRuntimeGetVersion(&runtime)); CUDA(cudaDriverGetVersion(&driver));
- printf("# GPU: %s; CUDA runtime: %d; driver: %d; nvcc: %d.%d.%d; CUB: %d\n",prop.name,runtime,driver,__CUDACC_VER_MAJOR__,__CUDACC_VER_MINOR__,__CUDACC_VER_BUILD__,CUB_VERSION);
- puts("# Input=complex<double>, accumulator=double, transform=norm; bandwidth is input-effective GB/s");
- puts("N,K,input_bytes,implementation,status,latency_us,input_GB_s,workspace_bytes,cub_calls,blocks,block_size,partitions,speedup_vs_cub_segmented,speedup_vs_cub_per_channel");
+ fprintf(stderr,"GPU: %s; CUDA runtime: %d; driver: %d; nvcc: %d.%d.%d; CUB: %d\n",prop.name,runtime,driver,__CUDACC_VER_MAJOR__,__CUDACC_VER_MINOR__,__CUDACC_VER_BUILD__,CUB_VERSION);
+ fprintf(stderr,"Input=complex<double>, accumulator=double, transform=norm; bandwidth is input-effective GB/s\n");
+ puts("N,K,input_bytes,implementation,status,reason,latency_us,input_GB_s,workspace_bytes,cub_calls,blocks,block_size,partitions,timed_repetitions,speedup_vs_cub_segmented,speedup_vs_cub_per_channel");
+ fflush(stdout);
  cudaStream_t stream; CUDA(cudaStreamCreate(&stream));
- bool all_correct=true;
+ bool success=true;
+ fprintf(stderr,"Initializing %zu bytes of input for bench-fixed\n",input_bytes);
+ fflush(stderr);
  C* in=nullptr; double* out=nullptr;
  cudaError_t setup=cudaMalloc(&in,input_bytes);
  if(setup==cudaSuccess) setup=cudaMalloc(&out,1024*sizeof(double));
@@ -108,63 +126,104 @@ bool benchmark_fixed() {
   setup=cudaGetLastError();
   if(setup==cudaSuccess) setup=cudaStreamSynchronize(stream);
  }
- if(setup!=cudaSuccess) fprintf(stderr,"fixed sweep input setup: %s\n",cudaGetErrorString(setup));
+ if(setup!=cudaSuccess) { fprintf(stderr,"fixed sweep input setup: %s\n",cudaGetErrorString(setup)); success=false; }
  for(uint64_t k=1;k<=1024;k*=2) {
-  uint64_t n=count/k; Plan p[2]; cub_baseline::Plan cp[2]; bool ready[4]={}, failed[4]={}; double us[4]={};
-  if(setup==cudaSuccess) {
-   for(int m=0;m<2;++m) {
-    cudaError_t err=cudaSuccess;
-    auto status=make_plan<C,double,Norm>(n,k,m?Mode::cooperative:Mode::two_kernel,p[m],&err);
-    ready[m]=status==Status::success;
-    if(!ready[m]) fprintf(stderr,"N=%llu K=%llu %s: %s (%s)\n",(unsigned long long)n,(unsigned long long)k,names[m],status_string(status),cudaGetErrorString(err));
+  uint64_t n=count/k; double us[4]={};
+  for(int m:order) {
+   const char* reason=nullptr; const char* status="ok";
+   if(m==3 && k>opt.max_cub_k) { status="skipped"; reason="too_many_cub_calls"; }
+   else if(budget_expired()) { status="skipped"; reason="time_budget_exceeded"; }
+   else if(setup!=cudaSuccess) { status="failed"; reason="input_setup_failed"; }
+   fprintf(stderr,"N=%llu K=%llu implementation=%s cub_calls=%llu warmups=%d timed_repetitions=%s%d decision=%s%s%s\n",
+    (unsigned long long)n,(unsigned long long)k,names[m],(unsigned long long)(m==2?1:m==3?k:0),warmups,opt.target_ms>0?"up_to_":"",opt.max_reps,
+    reason?status:"run",reason?" reason=":"",reason?reason:"");
+   fflush(stderr);
+   Plan plan{}; cub_baseline::Plan cp{}; size_t bytes=0; void* ws=nullptr;
+   cudaEvent_t start=nullptr,end=nullptr; cudaError_t err=cudaSuccess; int reps=0; double total_ms=0;
+   if(!reason) {
+    if(m<2) {
+     auto st=make_plan<C,double,Norm>(n,k,m?Mode::cooperative:Mode::two_kernel,plan,&err);
+     if(st==Status::cooperative_unsupported) { status="skipped"; reason="cooperative_unsupported"; }
+     else if(st!=Status::success) { status="failed"; reason="planning_failed"; fprintf(stderr,"%s planning: %s (%s)\n",names[m],status_string(st),cudaGetErrorString(err)); }
+     bytes=plan.workspace_bytes;
+    } else {
+     err=cub_baseline::make_plan(n,k,m==2?cub_baseline::Mode::segmented:cub_baseline::Mode::per_channel,in,out,Norm{},stream,cp);
+     if(err!=cudaSuccess) { status="failed"; reason="planning_failed"; }
+     bytes=cp.workspace_bytes;
+    }
    }
-   for(int m=0;m<2;++m) {
-    cudaError_t err=cub_baseline::make_plan(n,k,m?cub_baseline::Mode::per_channel:cub_baseline::Mode::segmented,in,out,Norm{},stream,cp[m]);
-    ready[m+2]=err==cudaSuccess;
-    if(err!=cudaSuccess) fprintf(stderr,"N=%llu K=%llu %s planning: %s\n",(unsigned long long)n,(unsigned long long)k,names[m+2],cudaGetErrorString(err));
+   if(!reason) err=cudaMalloc(&ws,std::max<size_t>(bytes,1));
+   auto run=[&]() -> cudaError_t {
+    if(m<2) { cudaError_t e=cudaSuccess; auto st=execute(plan,in,out,Norm{},stream,ws,bytes,&e); return st==Status::success?cudaSuccess:(e==cudaSuccess?cudaErrorInvalidValue:e); }
+    return cub_baseline::execute(cp,in,out,Norm{},stream,ws,bytes);
+   };
+   for(int i=0;!reason && i<warmups && err==cudaSuccess;++i) {
+    if(budget_expired()) { status="skipped"; reason="time_budget_exceeded"; break; }
+    err=run(); if(err==cudaSuccess) err=cudaStreamSynchronize(stream);
    }
-   for(int m=0;m<4;++m) {
-    if(!ready[m]) continue;
-    size_t bytes=m<2?p[m].workspace_bytes:cp[m-2].workspace_bytes;
-    void* ws=nullptr; cudaError_t err=cudaMalloc(&ws,std::max<size_t>(bytes,1));
-    auto run=[&]() -> cudaError_t {
-     if(m<2) { cudaError_t e=cudaSuccess; auto status=execute(p[m],in,out,Norm{},stream,ws,bytes,&e); return status==Status::success?cudaSuccess:(e==cudaSuccess?cudaErrorInvalidValue:e); }
-     return cub_baseline::execute(cp[m-2],in,out,Norm{},stream,ws,bytes);
-    };
-    for(int i=0;i<5 && err==cudaSuccess;++i) err=run();
-    cudaEvent_t start=nullptr,end=nullptr;
-    if(err==cudaSuccess) err=cudaEventCreate(&start);
-    if(err==cudaSuccess) err=cudaEventCreate(&end);
-    if(err==cudaSuccess) err=cudaEventRecord(start,stream);
-    for(int i=0;i<50 && err==cudaSuccess;++i) err=run();
+   if(!reason && err==cudaSuccess) err=cudaEventCreate(&start);
+   if(!reason && err==cudaSuccess) err=cudaEventCreate(&end);
+   while(!reason && err==cudaSuccess && reps<opt.max_reps) {
+    if(budget_expired()) { if(!reps) { status="skipped"; reason="time_budget_exceeded"; } break; }
+    err=cudaEventRecord(start,stream);
+    if(err==cudaSuccess) err=run();
     if(err==cudaSuccess) err=cudaEventRecord(end,stream);
     if(err==cudaSuccess) err=cudaEventSynchronize(end);
-    float ms=0;
-    if(err==cudaSuccess) err=cudaEventElapsedTime(&ms,start,end);
-    // The constant input has an exactly representable norm and reference sum.
-    std::vector<double> result(k);
-    if(err==cudaSuccess) err=cudaMemcpyAsync(result.data(),out,k*sizeof(double),cudaMemcpyDeviceToHost,stream);
-    if(err==cudaSuccess) err=cudaStreamSynchronize(stream);
-    bool correct=err==cudaSuccess;
-    if(correct) for(double x:result) if(!std::isfinite(x) || std::abs(x-double(n)*0.3125)>1e-12*(1+double(n)*0.3125)) { correct=false; break; }
-    if(err!=cudaSuccess) fprintf(stderr,"N=%llu K=%llu %s: %s\n",(unsigned long long)n,(unsigned long long)k,names[m],cudaGetErrorString(err));
-    else if(!correct) { fprintf(stderr,"N=%llu K=%llu %s: correctness check failed\n",(unsigned long long)n,(unsigned long long)k,names[m]); failed[m]=true; all_correct=false; }
-    if(correct) us[m]=ms*1000/50;
-    else ready[m]=false;
-    if(start) cudaEventDestroy(start); if(end) cudaEventDestroy(end);
-    if(ws) cudaFree(ws);
+    float ms=0; if(err==cudaSuccess) err=cudaEventElapsedTime(&ms,start,end);
+    if(err==cudaSuccess) { total_ms+=ms; ++reps; }
+    if(opt.target_ms>0 && total_ms>=opt.target_ms) break;
    }
-  }
-  for(int m=0;m<4;++m) {
-   printf("%llu,%llu,%zu,%s,",(unsigned long long)n,(unsigned long long)k,input_bytes,names[m]);
-   if(!us[m]) { puts(failed[m]?"failed,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A":"skipped,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A,N/A"); continue; }
-   printf("ok,%.3f,%.3f,%zu,",us[m],input_bytes/us[m]/1000,m<2?p[m].workspace_bytes:cp[m-2].workspace_bytes);
-   if(m<2) printf("0,%u,%u,%llu,",p[m].blocks,block_size,(unsigned long long)p[m].partitions); else printf("%llu,N/A,N/A,N/A,",(unsigned long long)(m==2?1:k));
-   if(m<2 && us[2]) printf("%.3f,",us[2]/us[m]); else printf("N/A,");
-   if(m<2 && us[3]) printf("%.3f\n",us[3]/us[m]); else puts("N/A");
+   std::vector<double> result(k);
+   if(!reason && err==cudaSuccess) err=cudaMemcpyAsync(result.data(),out,k*sizeof(double),cudaMemcpyDeviceToHost,stream);
+   if(!reason && err==cudaSuccess) err=cudaStreamSynchronize(stream);
+   if(!reason && err==cudaSuccess) for(double x:result) if(!std::isfinite(x) || std::abs(x-double(n)*0.3125)>1e-12*(1+double(n)*0.3125)) { status="failed"; reason="correctness_failed"; break; }
+   if(err!=cudaSuccess) { status="failed"; reason="cuda_error"; fprintf(stderr,"N=%llu K=%llu %s: %s\n",(unsigned long long)n,(unsigned long long)k,names[m],cudaGetErrorString(err)); }
+   // Drain any work submitted before an error before releasing its resources.
+   cudaError_t drain=cudaStreamSynchronize(stream);
+   if(drain!=cudaSuccess && !reason) { status="failed"; reason="cuda_error"; fprintf(stderr,"%s synchronization: %s\n",names[m],cudaGetErrorString(drain)); }
+   if(start) cudaEventDestroy(start); if(end) cudaEventDestroy(end); if(ws) cudaFree(ws);
+   if(status[0]=='f') success=false;
+   printf("%llu,%llu,%zu,%s,%s,%s,",(unsigned long long)n,(unsigned long long)k,input_bytes,names[m],status,reason?reason:"");
+   if(reason) printf("N/A,N/A,N/A,N/A,N/A,N/A,N/A,%d,N/A,N/A\n",reps);
+   else {
+    us[m]=total_ms*1000/reps;
+    printf("%.3f,%.3f,%zu,",us[m],input_bytes/us[m]/1000,bytes);
+    if(m<2) printf("0,%u,%u,%llu,",plan.blocks,block_size,(unsigned long long)plan.partitions);
+    else printf("%llu,N/A,N/A,N/A,",(unsigned long long)(m==2?1:k));
+    printf("%d,",reps);
+    if(m<2 && us[2]>0) printf("%.3f,",us[2]/us[m]); else printf("N/A,");
+    if(m<2 && us[3]>0) printf("%.3f\n",us[3]/us[m]); else puts("N/A");
+   }
+   fflush(stdout);
   }
  }
  if(in) cudaFree(in); if(out) cudaFree(out); CUDA(cudaStreamDestroy(stream));
- return all_correct;
+ return success;
 }
-int main(int argc,char** argv) { if(argc!=2) { fprintf(stderr,"usage: %s test|test-quick|bench|bench-fixed\n",argv[0]); return 2; } std::string mode=argv[1]; if(mode=="test") tests(false); else if(mode=="test-quick") tests(true); else if(mode=="bench") benchmark(); else if(mode=="bench-fixed") return benchmark_fixed()?0:1; else return 2; }
+
+bool parse_positive(const char* s, double& value) {
+ char* end=nullptr; errno=0; value=strtod(s,&end);
+ return *s && *end=='\0' && errno!=ERANGE && std::isfinite(value) && value>0;
+}
+int main(int argc,char** argv) {
+ if(argc<2) { fprintf(stderr,"usage: %s test|test-quick|bench|bench-fixed [--quick] [--max-cub-k K] [--max-reps N] [--target-ms MS] [--budget-seconds S]\n",argv[0]); return 2; }
+ std::string mode=argv[1];
+ if(mode=="bench-fixed") {
+  FixedOptions opt; bool reps_set=false;
+  for(int i=2;i<argc;++i) {
+   std::string arg=argv[i];
+   if(arg=="--quick") { opt.quick=true; continue; }
+   if((arg=="--max-cub-k" || arg=="--max-reps" || arg=="--target-ms" || arg=="--budget-seconds") && i+1<argc) {
+    double v; if(!parse_positive(argv[++i],v)) { fprintf(stderr,"invalid value for %s\n",arg.c_str()); return 2; }
+    if(arg=="--max-cub-k") { if(v>1024 || v!=floor(v)) { fprintf(stderr,"max-cub-k must be an integer from 1 to 1024\n"); return 2; } opt.max_cub_k=static_cast<uint64_t>(v); }
+    else if(arg=="--max-reps") { if(v>INT_MAX || v!=floor(v)) { fprintf(stderr,"max-reps must be a positive integer\n"); return 2; } opt.max_reps=static_cast<int>(v); reps_set=true; }
+    else if(arg=="--target-ms") opt.target_ms=v;
+    else opt.budget_seconds=v;
+   } else { fprintf(stderr,"unknown or incomplete option: %s\n",arg.c_str()); return 2; }
+  }
+  if(opt.quick && !reps_set) opt.max_reps=1;
+  return benchmark_fixed(opt)?0:1;
+ }
+ if(argc!=2) { fprintf(stderr,"options are only supported for bench-fixed\n"); return 2; }
+ if(mode=="test") tests(false); else if(mode=="test-quick") tests(true); else if(mode=="bench") benchmark(); else { fprintf(stderr,"unknown mode: %s\n",mode.c_str()); return 2; }
+}
