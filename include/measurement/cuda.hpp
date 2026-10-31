@@ -49,22 +49,29 @@ struct KernelResources {
   int max_threads = 0, active_blocks_per_sm = 0;
   double theoretical_occupancy = 0;
 };
+enum class ReductionMethod { two_kernel, cooperative };
 struct ReductionResources {
+  bool cooperative = false;
+  Size sm_count = 0, max_resident_blocks = 0;
   Size blocks = 0;
   KernelResources first, second;
   Size default_shared_limit = 0, optin_shared_limit = 0;
   int dynamic_shared_limit = 0;
   bool register_residency_verified = false;
 };
-ReductionResources reduction_resources(const Config&, AccumulatorStorage);
+// Resource inspection does not certify atomic policy or register residency.
+ReductionResources reduction_resources(const Config&, AccumulatorStorage,
+  ReductionMethod = ReductionMethod::two_kernel);
 std::string resource_description(const ReductionResources&);
 
 // Owns reusable buffers; construction and position upload are outside timing.
+// Cooperative construction is gated until the strict synchronization audit passes.
 // Use on the device where it was constructed. Calls on one workspace are serial.
 class GlobalReduction {
  public:
   GlobalReduction(const Config& config, GlobalLayout layout,
-                  AccumulatorStorage storage = AccumulatorStorage::global);
+                  AccumulatorStorage storage = AccumulatorStorage::global,
+                  ReductionMethod method = ReductionMethod::two_kernel);
   void execute(const DeviceState& state, cudaStream_t stream = nullptr);
   Result run(const DeviceState& state, std::vector<double>& output,
              cudaStream_t stream = nullptr);
@@ -76,6 +83,7 @@ class GlobalReduction {
   Config config_;
   GlobalLayout layout_;
   AccumulatorStorage storage_;
+  ReductionMethod method_;
   Size dynamic_shared_ = 0;
   Size blocks_, threads_;
   DeviceBuffer<unsigned> positions_;

@@ -267,3 +267,39 @@ rejection with requested-byte diagnostics, and unverified/capacity register
 rejection. Representative sanitizer invocations use the existing sanitize target.
 Actual host/GPU results and the environment's support matrix are recorded in
 README. No cooperative launch or CUB implementation is part of Step 3.
+
+## Step 4: gated cooperative reduction
+
+`ReductionMethod::cooperative` selects one combined kernel per storage backend;
+global/shared layouts remain runtime choices. Two-kernel execution remains the
+default. Shared device routines implement initialization, 64-bit traversal,
+custom block partials and unique block-stride final bin ownership in both paths.
+The combined kernel performs one unconditional `this_grid().sync()` between
+partial writes and finalization, including threads/blocks without useful work.
+Its launch API is `cudaLaunchCooperativeKernel`, with exactly the requested
+`G=SM_count*sm_multiplier` blocks and supported block size.
+
+`reduction_resources(config, storage, method)` inspects the exact combined kernel
+for cooperative requests, checks device support and launch limits, applies
+shared-memory opt-in, and queries occupancy using its actual dynamic allocation.
+The maximum resident grid is `active_blocks_per_SM*SM_count`; G above that bound
+is rejected on the host. The resource result is an eligibility calculation, not
+an atomic-policy or register certification. Constructor gates run before device
+buffer allocation, and eligibility is rechecked before cooperative enqueue.
+Register qualification of the two-stage kernel never qualifies the combined
+kernel; each needs independent evidence.
+
+The strict atomic policy is unchanged. No synchronization-only exception is
+introduced. All cooperative constructors currently reject execution: examined
+vendor CUDA 12.9.79 synchronization uses atomic addition, and no build-bound
+atomic-free synchronization certification exists. The source inspection,
+package/header hashes and unavailable generated-code evidence are recorded in
+`docs/cooperative-sync-audit.md`. In-capacity register requests also remain
+unverified for the combined kernel; larger counts exceed capacity.
+
+The driver reports each method separately and contains CPU and matching
+two-kernel comparisons for executable cooperative outputs. Evidence capture
+retains the selected vendor preprocessing as well as PTX/SASS. Tests were
+explicitly skipped for Step 4; no runtime correctness or numerical residency
+results are claimed in the absence of CUDA tools/hardware. CUB and the complete
+benchmark matrix remain deferred.

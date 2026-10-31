@@ -1,11 +1,11 @@
 # Quantum measurement reduction
 
-Steps 1–3 implement configuration, deterministic cuRAND input, a bounded CPU
+Steps 1–4 implement configuration, deterministic cuRAND input, a bounded CPU
 reference, and independent two-kernel reductions with per-thread global-memory
 accumulators in thread-major and bin-major layouts, both shared-memory layouts,
 and a fixed-capacity register candidate. The six-step contract is in
 [docs/measurement-reduction-spec.md](docs/measurement-reduction-spec.md).
-Cooperative reductions and CUB baselines remain deferred.
+Step 4 adds gated cooperative kernels; CUB baselines remain deferred.
 
 Build with GNU Make and a C++17 compiler:
 
@@ -37,7 +37,7 @@ Supported block sizes are **128, 256, 512**, validated explicitly. Both kernels
 launch exactly `G = SM_count * sm_multiplier` blocks on the same stream. Each
 thread reads its grid-stride input elements once. Bin extraction uses the runtime
 ordered positions. Reductions use full-warp shuffles followed by shared scratch,
-with barriers before scratch reuse. No reduction path calls libraries or atomics.
+with barriers before scratch reuse. The two-kernel reduction path uses no library reductions or atomics.
 
 For global storage, `T = G * block_size`, `B = 2^k`, reusable device workspace is:
 
@@ -139,3 +139,55 @@ rejection, and repeats dirty-workspace and changed-input cases. Quick sanitizer
 cases include k=1,3,6,8, covering small storage, capacity boundary, opt-in candidates
 and oversized requests on typical devices. Unsupported shared configurations
 are printed explicitly and skipped; supported runtime failures fail the suite.
+
+Step 4 adds `ReductionMethod::cooperative` as the optional fourth constructor
+argument to `GlobalReduction`; the default remains `two_kernel`. The driver
+reports both methods for each backend/layout. Cooperative kernels share the
+custom accumulation and block reduction routines with the two-kernel path,
+write all bin-major partials, call `cooperative_groups::this_grid().sync()` once,
+then finalize with `bin=blockIdx.x; bin<B; bin+=G`. Every thread reaches the grid
+collective, including idle input threads and blocks owning no final bins.
+Measurement count and ordered positions remain runtime inputs.
+
+Before allocation or launch, eligibility checks query cooperative device support,
+apply shared-memory opt-in to the actual combined kernel, query its attributes
+and occupancy with the requested block size and dynamic bytes, and calculate:
+
+- Requested blocks: `G = SM_count * sm_multiplier`.
+- Resident block limit: `R = SM_count * active_blocks_per_SM(combined kernel, S, dynamic_bytes)`.
+- Eligible residency: `G <= R`; oversized requests throw `Unsupported` on the host.
+
+Diagnostics print G, SM count, R, and the combined kernel's resource data.
+No grid/block adjustment or backend fallback is made. The enqueue path uses
+`cudaLaunchCooperativeKernel` with exactly G blocks and S threads. Register
+qualification is independent for the combined kernel and remains unverified;
+k=4..8 still exceeds its fixed capacity. The existing event timing and workspace
+ownership apply, with all cooperative reduction work in one launch.
+
+**All cooperative execution is currently disabled.** The specification retains
+its strict atomic policy with no synchronization exception. Inspection of
+NVIDIA CUDA runtime 12.9.79 shows atomic addition inside `grid.sync()`, conflicting
+with that policy. Other builds have no reviewed atomic-free synchronization
+certification. See [the synchronization audit](docs/cooperative-sync-audit.md)
+for package/header hashes, call path, source locations, and generated-code limits.
+`make cuda-evidence CUDA_ARCH=sm_XX` now also retains the preprocessed reduction
+source, including the selected vendor synchronization implementation. Evidence
+capture cannot enable execution. If a future build is certified, the driver
+compares each executable cooperative output with both the CPU reference and the
+matching successful two-kernel output before reporting success.
+
+Step 4 results in this environment (2026-10-31):
+
+| Combination | Support / observed result |
+| --- | --- |
+| Two-kernel global/shared, both layouts | Preserved; CUDA build/runtime unverified here |
+| Cooperative global/shared, both layouts, k=1..8 | Unsupported: strict synchronization audit gate; device limits may reject earlier |
+| Cooperative registers, k=1..3, layout n/a | Unsupported: combined residency unverified and synchronization policy gate |
+| Registers, either method, k=4..8 | Unsupported: eight-bin capacity |
+
+`make host` succeeds (library already current). `make cuda` stops because nvcc
+is unavailable. Tests and sanitizers were skipped at the user's request,
+including small-input, repeated-run, arbitrary-position and oversized-residency
+checks. No actual correctness results, numeric device eligibility calculations,
+PTX/SASS findings, or timings can be claimed for this step. No known-invalid
+cooperative launch was attempted and no full benchmark matrix was added.
