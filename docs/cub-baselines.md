@@ -1,15 +1,38 @@
 # Step 5: CUB baseline definitions and audit
 
-Implementation date: 2026-10-31. No installed CUDA toolkit, CCCL/CUB header tree,
-nvcc, cuobjdump or identified CUDA GPU was found in this environment. Installed
-versions are therefore **unavailable**, not inferred from downloaded source.
-For API and source inspection we retrieved NVIDIA's unmodified
-[CCCL v2.8.2 sources](https://github.com/NVIDIA/cccl/tree/v2.8.2/cub/cub).
-`cub/version.cuh` defines CUB_VERSION=200802. Runtime reporting prints the
-actual build's CUDART_VERSION and CUB_VERSION. Only CUB 2.8.2 is enabled by the
-source-audit gate; other versions report unsupported before allocation/timing.
-This gate assumes unmodified upstream headers. A patched vendor distribution
-needs review against the hashes below. No generated-code audit is claimed.
+## Version-independent compatibility policy
+
+The installed CUDA/CCCL toolchain supplies CUB (or headers selected through
+`CPPFLAGS`). There is no version whitelist or minimum-version gate. CUB 3.3.4
+and other releases can compile and execute both baselines when the required
+public APIs are compatible. API incompatibilities fail compilation directly;
+there is no replacement with custom kernels or silent version-based test skip.
+Resource limits, register residency and cooperative synchronization gates remain
+independent and unchanged.
+
+Runtime diagnostics and benchmark metadata report actual CUB, CCCL when its
+version header/macro is available, CUDA header and compiler versions. Existing
+build metadata records compiler flags, and device metadata and kernel attributes
+record GPU compute capability and binary/PTX architectures.
+
+The strict atomic-free requirement forbids atomic addition and atomic-based
+accumulation, including inside library calls. The selected build's atomic-free
+audit status is **unverified**; removing the version gate is not certification.
+These properties require separate evidence:
+
+- API compatibility: compilation against the selected headers.
+- Numerical correctness: CPU-reference comparisons and CUDA error checks,
+  including retained 64-bit mapping/offset boundary regressions.
+- Atomic-free implementation verification: review of the installed headers,
+  selected policies, generated kernels and called functions for each architecture.
+- Performance: actual event timings under the unchanged benchmark methodology.
+
+The historical source inspection below concerns only NVIDIA's unmodified
+[CCCL v2.8.2 sources](https://github.com/NVIDIA/cccl/tree/v2.8.2/cub/cub)
+(`CUB_VERSION=200802`). It does not certify installed headers, other releases,
+patched vendor distributions or generated device code. Internal policy and
+one-CTA-per-segment findings below apply only to those inspected sources;
+the installed DeviceSegmentedReduce policy is left to CUB.
 
 ## A: matched BlockReduce pipeline
 
@@ -71,7 +94,7 @@ all reduction kernels. Allocation, descriptor/position preparation, input
 creation, output download and independent compensated CPU reference are outside
 timing. Mismatches and nonfinite results are failures with elapsed time cleared.
 
-## Offset and atomic source audit
+## Historical 2.8.2 offset and atomic source audit
 
 All file paths here are relative to the linked upstream `cub/cub/` tree.
 
@@ -109,8 +132,9 @@ All file paths here are relative to the linked upstream `cub/cub/` tree.
   BlockReduce algorithm is never selected. Cooperative grid.sync is excluded
   from execution by the independent policy gate.
 
-This establishes upstream **source** compatibility and atomic policy for the
-selected algorithms; it is not a successful CUDA build or device-code audit.
+This establishes upstream 2.8.2 **source** compatibility and atomic policy for the
+inspected algorithms; it is not a successful CUDA build or device-code audit,
+and does not verify the selected build.
 `make cuda-evidence CUDA_ARCH=sm_XX` retains CUB and combined-kernel preprocessing,
 compiler/ptxas output, resource usage, PTX/SASS and source/binary hashes for a
 future actual build. Audit every selected kernel and called function, including
@@ -125,7 +149,7 @@ all eight register accumulators, before changing residency/synchronization gates
 | Host mapping/offset tests | Added; not run at user request |
 | GPU CPU-reference comparisons, repeated reuse, stream checks | Added; not run at user request |
 | Sanitizers, CUDA timings, occupancy numbers, PTX/SASS | Not run / unavailable |
-| CUB other than 2.8.2 | Unsupported: API/offset/atomic source audit absent |
+| Any installed CUB, including 3.3.4 | No version rejection; API compatibility, GPU correctness and atomic-free execution unverified here |
 | CUB registers, k=1..3 | Unsupported: actual CUB kernel residency unverified |
 | CUB registers, k=4..8 | Unsupported: eight-double capacity |
 | CUB cooperative, every backend/layout | Unsupported: strict grid.sync atomic-policy gate, possibly earlier resource rejection |
@@ -159,3 +183,11 @@ d9fcdfe35341774a595c1c88b3ed49fd7a79fb19d2b29a41a28ca71473f609d3  block_speciali
 0cefb0f0b4b951ce1bcc4239e001fe5fda81942b404b3d6e8d6b5d73da9cf3b7  warp_warp_reduce.cuh
 d4b3db062dfe3879eacd59915238b772b6a1e07ea9d67a18449933ba8d14e4d1  warp_specializations_warp_reduce_shfl.cuh
 ```
+
+## Version-policy change validation
+
+Tests, including `make test-host`, `make test-cub`, `make test-cuda`, and
+`make benchmark-smoke`, were skipped at the user's request for this change.
+Existing host q=31/32 logical-index and offset regressions and GPU CPU-reference,
+reuse, stream, resource and policy checks are retained. No CUB 3.3.4 compilation,
+GPU execution, numerical pass, atomic-free certification or timing is claimed.

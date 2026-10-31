@@ -1,14 +1,15 @@
 # Step 6: benchmark and validation
 
 Build exclusively with Make, C++17 and a CUDA toolkit providing cuRAND and
-cuda::std::complex. The CUB source audit currently admits unmodified CUB 2.8.2
-only. Select the real GPU architecture explicitly, for example:
+cuda::std::complex. CUB versions, including 3.3.4, are accepted when the required
+BlockReduce and DeviceSegmentedReduce APIs compile; API incompatibilities fail
+compilation without a fallback. Select the real GPU architecture explicitly, for example:
 
 ```sh
 make cuda NVCCFLAGS='-O2 -arch=sm_80 -lineinfo'
 ```
 
-The runtime reports actual CUB/header, CUDA runtime/driver and cuRAND versions,
+The runtime reports actual CUB, available CCCL, CUDA header/compiler, runtime/driver and cuRAND versions,
 GPU name, compute capability and SM count. A generated build header records
 compiler/version, full flags, Git revision, SHA-256 of sources and build tools,
 and a source/flags build ID. Runtime kernel attributes also record binary and
@@ -190,8 +191,13 @@ No atomic-add exception has been introduced. Cooperative methods remain
 unsupported because no build has certified atomic-free grid synchronization;
 the examined CUDA vendor implementation violates the policy. Register requests
 remain unsupported until binary/architecture-bound residency evidence exists;
-k>3 additionally exceeds capacity. CUB methods retain their independent CUB
-2.8.2 source-audit gate. See cooperative-sync-audit.md and cub-baselines.md.
+k>3 additionally exceeds capacity. CUB methods have no version gate and record
+atomic-free audit status as **unverified for the selected build**. The strict
+atomic-free requirement still applies: compatible APIs, passing CPU-reference
+comparisons and performance measurements are separate from implementation
+verification. Review the installed source and generated device code for every
+selected architecture; numerical correctness alone cannot prove absence of
+atomics. See cooperative-sync-audit.md and cub-baselines.md.
 Do not interpret the presence of all requested rows as support for every row.
 
 For this Step 6 implementation, tests and sanitizers were **skipped at the

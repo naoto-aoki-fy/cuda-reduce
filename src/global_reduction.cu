@@ -219,7 +219,6 @@ const void* cub_kernel(const Config& c, AccumulatorStorage storage, ReductionMet
 }
 Size checked_blocks(const Config& c, AccumulatorStorage storage, ReductionMethod method, BlockPrimitive primitive) {
   c.validate();
-  if (primitive == BlockPrimitive::cub) require_audited_cub();
   if (storage == AccumulatorStorage::registers && c.bins() > 8)
     throw Unsupported("register capacity=8 doubles; supported runtime k=1..3; layout=n/a");
   const auto resources = reduction_resources(c, storage, method, primitive);
@@ -285,7 +284,6 @@ ReductionResources reduction_resources(const Config& c, AccumulatorStorage stora
   storage_name(storage);
   if (primitive != BlockPrimitive::custom && primitive != BlockPrimitive::cub)
     throw std::invalid_argument("unknown block primitive");
-  if (primitive == BlockPrimitive::cub) require_audited_cub();
   if (method != ReductionMethod::two_kernel && method != ReductionMethod::cooperative)
     throw std::invalid_argument("unknown reduction method");
   int device;

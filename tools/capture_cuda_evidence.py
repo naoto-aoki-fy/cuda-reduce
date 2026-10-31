@@ -55,8 +55,9 @@ manifest['preprocess_exit_code'] = capture('cooperative-preprocessed.ii', prepro
 cub_preprocess = preprocess[:-1] + ['src/cub_reduction.cu']
 manifest['cub_preprocess_command'] = cub_preprocess
 manifest['cub_preprocess_exit_code'] = capture('cub-preprocessed.ii', cub_preprocess)
-manifest['cub_policy'] = ('Source audit: CCCL/CUB 2.8.2; non-atomic warp reductions; '
-                          'segmented Sum with int64 offsets and lazy gather; '
+manifest['cub_policy'] = ('Atomic-free audit unverified for selected build; '
+                          'BlockReduce requests WARP_REDUCTIONS; segmented Sum uses installed policy; '
+                          'int64 offsets and lazy gather; no version gate; '
                           'register kernels require independent residency audit')
 status = capture('build.log', command)
 manifest['build_exit_code'] = status

@@ -69,7 +69,6 @@ void check(Config c) {
 }
 int main() {
   try {
-    require_audited_cub();
     std::cout << cub_version_description() << '\n';
     for (unsigned q : {3u, 8u}) for (unsigned k = 1; k <= q; ++k) {
       std::vector<std::vector<unsigned>> positions;

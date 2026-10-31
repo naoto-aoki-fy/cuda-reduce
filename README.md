@@ -197,10 +197,16 @@ checks. No actual correctness results, numeric device eligibility calculations,
 PTX/SASS findings, or timings can be claimed for this step. No known-invalid
 cooperative launch was attempted and no full benchmark matrix was added.
 
-Step 5 uses `make cuda` with an unmodified CCCL/CUB 2.8.2 header tree
-(CUB_VERSION=200802) available through the toolkit or `CPPFLAGS`. Other CUB
-versions report unsupported until audited. The driver reports the actual build
-versions and algorithms, then compares both baselines with the same CPU reference.
+Step 5 uses `make cuda` with the installed toolkit's CCCL/CUB headers or headers
+selected through `CPPFLAGS`. There is no CUB version whitelist: versions including
+3.3.4 can execute when the required APIs compile. Incompatible APIs produce compiler
+errors without selecting a fallback. The driver reports actual CUB, available CCCL,
+CUDA header/compiler versions and selected algorithms, then compares both baselines
+with the same CPU reference. GPU architecture and build flags are recorded in
+benchmark metadata. The strict atomic-free requirement remains in force; the
+selected build's atomic-free audit status is **unverified**. API compatibility,
+numerical validation and timing do not establish atomic-free execution. See
+[the CUB policy and historical source evidence](docs/cub-baselines.md).
 `BlockPrimitive::cub` selects matched BlockReduce kernels at S=128/256/512,
 with independent resource inspection and register/cooperative gates.
 `SegmentedReduction` runs once with custom tuning fields n/a and signed 64-bit

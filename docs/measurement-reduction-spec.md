@@ -318,8 +318,11 @@ qualification remain independent gates.
 through a signed 64-bit random-access gather/norm iterator and signed 64-bit
 segment-offset iterator. It prepares no N-element array and queries reusable
 storage outside timing. The driver labels custom tuning parameters n/a and runs
-this method once. The source audit enables unmodified CCCL/CUB 2.8.2 only;
-other versions report unsupported. Baseline definitions, offset/atomic call-path
+this method once. Installed CUB versions are accepted when the required APIs
+compile, without a version whitelist or backend substitution. The strict
+atomic-free requirement remains unchanged; the selected build's audit status is
+unverified until its implementation is reviewed. Historical 2.8.2 source evidence
+does not certify arbitrary installed headers or generated code. Baseline definitions, offset/atomic call-path
 evidence, version identification, unsupported cases and unrun validation are in
 [the Step 5 report](cub-baselines.md). Tests were skipped by user instruction;
 no full benchmark matrix was executed.

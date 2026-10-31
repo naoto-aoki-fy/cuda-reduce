@@ -56,7 +56,6 @@ struct KernelResources {
 };
 enum class BlockPrimitive { custom, cub };
 std::string cub_version_description();
-void require_audited_cub();
 enum class ReductionMethod { two_kernel, cooperative };
 struct ReductionResources {
   bool cooperative = false;

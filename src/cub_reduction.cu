@@ -1,6 +1,9 @@
 #include "measurement/cuda.hpp"
 #include "measurement/gather.hpp"
 #include <cub/version.cuh>
+#if __has_include(<cuda/version>)
+#include <cuda/version>
+#endif
 #include <cub/device/device_segmented_reduce.cuh>
 #include <sstream>
 #include <algorithm>
@@ -8,16 +11,18 @@
 namespace measurement {
 std::string cub_version_description() {
   std::ostringstream out;
-  out << "CUDA headers=" << CUDART_VERSION << " CUB=" << CUB_VERSION
-      << " (CCCL release source audit: 2.8.2); BlockReduce=BLOCK_REDUCE_WARP_REDUCTIONS"
-      << "; DeviceSegmentedReduce::Sum=one CTA per segment, policy-hub warp reductions";
+  out << "CUDA headers=" << CUDART_VERSION << " CUB=" << CUB_VERSION;
+#ifdef CCCL_VERSION
+  out << " CCCL=" << CCCL_VERSION;
+#else
+  out << " CCCL=unavailable";
+#endif
+  out << " CUDA compiler=" << __CUDACC_VER_MAJOR__ << '.' << __CUDACC_VER_MINOR__
+      << '.' << __CUDACC_VER_BUILD__
+      << "; atomic-free audit=unverified for selected build"
+      << "; BlockReduce=BLOCK_REDUCE_WARP_REDUCTIONS"
+      << "; DeviceSegmentedReduce::Sum=installed CUB policy (no overrides)";
   return out.str();
-}
-void require_audited_cub() {
-  // Unknown releases must be inspected before their executed library path is enabled.
-  if (CUB_VERSION != 200802)
-    throw Unsupported("CUB API/64-bit-offset/atomic-policy source audit covers only CUB 2.8.2; "
-      "selected CUB_VERSION=" + std::to_string(CUB_VERSION) + "; see docs/cub-baselines.md");
 }
 namespace {
 struct GatherNorm {
@@ -34,7 +39,6 @@ static_assert(sizeof(std::iterator_traits<InputIterator>::difference_type) == 8)
 static_assert(sizeof(std::iterator_traits<OffsetIterator>::value_type) == 8);
 Config supported_config(const Config& c) {
   c.validate();
-  require_audited_cub();
   // q=63's exclusive endpoint cannot be represented by a signed difference_type.
   if (c.state_size() > Size(std::numeric_limits<LogicalOffset>::max()))
     throw Unsupported("DeviceSegmentedReduce exclusive N exceeds signed 64-bit iterator range");
@@ -45,7 +49,8 @@ cudaError_t sum(const Config& c, const GatherMap& map, const cuda::std::complex<
   InputIterator input{{state, map}, 0};
   OffsetIterator offsets{{static_cast<LogicalOffset>(map.length)}, 0};
   // B <= 256; only the number of segments is int. Offset values and input
-  // iterator differences are int64_t through the entire audited Sum call path.
+  // iterator differences are int64_t at the CUB API boundary. The installed
+  // implementation must preserve that range; see docs/cub-baselines.md.
   return cub::DeviceSegmentedReduce::Sum(temporary, bytes, input, output,
     static_cast<int>(c.bins()), offsets, offsets + 1, stream);
 }
