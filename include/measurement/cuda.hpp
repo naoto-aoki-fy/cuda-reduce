@@ -1,10 +1,12 @@
 #pragma once
 #include "measurement/core.hpp"
+#include "measurement/gather.hpp"
 #include <cuda_runtime.h>
 #include <cuda/std/complex>
 #include <curand.h>
 #include <stdexcept>
 #include <utility>
+#include <memory>
 
 namespace measurement {
 class Unsupported : public std::runtime_error {
@@ -49,6 +51,9 @@ struct KernelResources {
   int max_threads = 0, active_blocks_per_sm = 0;
   double theoretical_occupancy = 0;
 };
+enum class BlockPrimitive { custom, cub };
+std::string cub_version_description();
+void require_audited_cub();
 enum class ReductionMethod { two_kernel, cooperative };
 struct ReductionResources {
   bool cooperative = false;
@@ -61,7 +66,7 @@ struct ReductionResources {
 };
 // Resource inspection does not certify atomic policy or register residency.
 ReductionResources reduction_resources(const Config&, AccumulatorStorage,
-  ReductionMethod = ReductionMethod::two_kernel);
+  ReductionMethod = ReductionMethod::two_kernel, BlockPrimitive = BlockPrimitive::custom);
 std::string resource_description(const ReductionResources&);
 
 // Owns reusable buffers; construction and position upload are outside timing.
@@ -71,7 +76,8 @@ class GlobalReduction {
  public:
   GlobalReduction(const Config& config, GlobalLayout layout,
                   AccumulatorStorage storage = AccumulatorStorage::global,
-                  ReductionMethod method = ReductionMethod::two_kernel);
+                  ReductionMethod method = ReductionMethod::two_kernel,
+                  BlockPrimitive primitive = BlockPrimitive::custom);
   void execute(const DeviceState& state, cudaStream_t stream = nullptr);
   Result run(const DeviceState& state, std::vector<double>& output,
              cudaStream_t stream = nullptr);
@@ -84,9 +90,23 @@ class GlobalReduction {
   GlobalLayout layout_;
   AccumulatorStorage storage_;
   ReductionMethod method_;
+  BlockPrimitive primitive_;
   Size dynamic_shared_ = 0;
   Size blocks_, threads_;
   DeviceBuffer<unsigned> positions_;
   DeviceBuffer<double> sums_, partials_, output_;
+};
+// CUB chooses its launch configuration; custom tuning fields are not applicable.
+class SegmentedReduction {
+ public:
+  explicit SegmentedReduction(const Config&);
+  void execute(const DeviceState&, cudaStream_t = nullptr);
+  Result run(const DeviceState&, std::vector<double>&, cudaStream_t = nullptr);
+ private:
+  Config config_;
+  GatherMap map_;
+  DeviceBuffer<double> output_;
+  std::size_t temporary_bytes_ = 0;
+  std::unique_ptr<DeviceBuffer<unsigned char>> temporary_;
 };
 } // namespace measurement

@@ -1,11 +1,13 @@
 # Quantum measurement reduction
 
-Steps 1–4 implement configuration, deterministic cuRAND input, a bounded CPU
+Steps 1–5 implement configuration, deterministic cuRAND input, a bounded CPU
 reference, and independent two-kernel reductions with per-thread global-memory
 accumulators in thread-major and bin-major layouts, both shared-memory layouts,
 and a fixed-capacity register candidate. The six-step contract is in
 [docs/measurement-reduction-spec.md](docs/measurement-reduction-spec.md).
-Step 4 adds gated cooperative kernels; CUB baselines remain deferred.
+Step 4 adds gated cooperative kernels. Step 5 adds matched CUB BlockReduce and
+lazy-gather DeviceSegmentedReduce baselines; see [definitions, source audit and
+results](docs/cub-baselines.md).
 
 Build with GNU Make and a C++17 compiler:
 
@@ -191,3 +193,17 @@ including small-input, repeated-run, arbitrary-position and oversized-residency
 checks. No actual correctness results, numeric device eligibility calculations,
 PTX/SASS findings, or timings can be claimed for this step. No known-invalid
 cooperative launch was attempted and no full benchmark matrix was added.
+
+Step 5 uses `make cuda` with an unmodified CCCL/CUB 2.8.2 header tree
+(CUB_VERSION=200802) available through the toolkit or `CPPFLAGS`. Other CUB
+versions report unsupported until audited. The driver reports the actual build
+versions and algorithms, then compares both baselines with the same CPU reference.
+`BlockPrimitive::cub` selects matched BlockReduce kernels at S=128/256/512,
+with independent resource inspection and register/cooperative gates.
+`SegmentedReduction` runs once with custom tuning fields n/a and signed 64-bit
+lazy gather and segment offsets, including the exclusive N=2^31 endpoint.
+
+`make host` succeeds; `make cuda` cannot compile because nvcc is unavailable.
+Tests were skipped at the user's request. Added mapping/boundary checks and
+`make test-cub` GPU checks remain unrun. No GPU correctness, resource, timing or
+sanitizer results are claimed, and no full benchmark matrix was run.

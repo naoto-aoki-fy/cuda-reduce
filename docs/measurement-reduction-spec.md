@@ -303,3 +303,23 @@ retains the selected vendor preprocessing as well as PTX/SASS. Tests were
 explicitly skipped for Step 4; no runtime correctness or numerical residency
 results are claimed in the absence of CUDA tools/hardware. CUB and the complete
 benchmark matrix remain deferred.
+
+
+## Step 5: separate CUB baselines
+
+`BlockPrimitive::custom` remains the default and instantiates only the independent
+custom reduction primitive. `BlockPrimitive::cub` instantiates matched CUB kernels
+at S=128/256/512, preserving runtime measurement count, positions, accumulator
+storage/layout and two-kernel/cooperative structure. Resource checks inspect the
+actual selected CUB kernels. Register residency and cooperative synchronization
+qualification remain independent gates.
+
+`SegmentedReduction` executes `DeviceSegmentedReduce::Sum` on the original state
+through a signed 64-bit random-access gather/norm iterator and signed 64-bit
+segment-offset iterator. It prepares no N-element array and queries reusable
+storage outside timing. The driver labels custom tuning parameters n/a and runs
+this method once. The source audit enables unmodified CCCL/CUB 2.8.2 only;
+other versions report unsupported. Baseline definitions, offset/atomic call-path
+evidence, version identification, unsupported cases and unrun validation are in
+[the Step 5 report](cub-baselines.md). Tests were skipped by user instruction;
+no full benchmark matrix was executed.

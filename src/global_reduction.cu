@@ -3,6 +3,7 @@
 #include <climits>
 #include <algorithm>
 #include <cooperative_groups.h>
+#include <cub/block/block_reduce.cuh>
 
 namespace measurement {
 namespace {
@@ -12,25 +13,35 @@ __device__ double warp_sum(double value) {
     value += __shfl_down_sync(0xffffffffu, value, delta);
   return value;
 }
+template<int S = 0>
 __device__ double block_sum(double value, double* scratch) {
-  const unsigned lane = threadIdx.x % 32;
-  const unsigned warp = threadIdx.x / 32;
-  value = warp_sum(value);
-  if (lane == 0) scratch[warp] = value;
-  __syncthreads();
-  double total = 0;
-  if (warp == 0) {
-    total = lane < blockDim.x / 32 ? scratch[lane] : 0.0;
-    total = warp_sum(total);
+  if constexpr (S != 0) {
+    using Reduce = cub::BlockReduce<double, S, cub::BLOCK_REDUCE_WARP_REDUCTIONS>;
+    __shared__ typename Reduce::TempStorage temporary;
+    const double total = Reduce(temporary).Sum(value);
+    __syncthreads(); // All readers finish before reusing CUB storage for another bin.
+    return total;
+  } else {
+    const unsigned lane = threadIdx.x % 32;
+    const unsigned warp = threadIdx.x / 32;
+    value = warp_sum(value);
+    if (lane == 0) scratch[warp] = value;
+    __syncthreads();
+    double total = 0;
+    if (warp == 0) {
+      total = lane < blockDim.x / 32 ? scratch[lane] : 0.0;
+      total = warp_sum(total);
+    }
+    // All scratch readers finish before any thread starts the next bin.
+    __syncthreads();
+    return total; // Used only by thread zero.
   }
-  // All scratch readers finish before any thread starts the next bin.
-  __syncthreads();
-  return total; // Used only by thread zero.
 }
 __device__ Size accumulator_index(Size g, Size bin, Size threads, Size bins,
                                   bool bin_major) {
   return bin_major ? bin * threads + g : g * bins + bin;
 }
+template<int S = 0>
 __device__ __forceinline__ void first_stage_body(const cuda::std::complex<double>* state, Size count,
                             const unsigned* positions, unsigned k, Size bins,
                             double* sums, double* partials, bool bin_major, double* scratch) {
@@ -47,13 +58,14 @@ __device__ __forceinline__ void first_stage_body(const cuda::std::complex<double
     sums[accumulator_index(g, bin, threads, bins, bin_major)] += re * re + im * im;
   }
   for (Size bin = 0; bin < bins; ++bin) {
-    const double total = block_sum(
+    const double total = block_sum<S>(
       sums[accumulator_index(g, bin, threads, bins, bin_major)], scratch);
     // Fixed bin-major partials, independent of the accumulator layout.
     if (threadIdx.x == 0) partials[bin * Size{gridDim.x} + Size{blockIdx.x}] = total;
   }
 }
 // Shared accumulators and reduction scratch are separate, double-aligned regions.
+template<int S = 0>
 __device__ __forceinline__ void shared_first_stage_body(const cuda::std::complex<double>* state, Size count,
     const unsigned* positions, unsigned k, Size bins, double* partials, bool bin_major, double* scratch) {
   extern __shared__ double sums[];
@@ -71,12 +83,13 @@ __device__ __forceinline__ void shared_first_stage_body(const cuda::std::complex
     sums[accumulator_index(t, bin, size, bins, bin_major)] += re * re + im * im;
   }
   for (Size bin = 0; bin < bins; ++bin) {
-    const double total = block_sum(sums[accumulator_index(t, bin, size, bins, bin_major)], scratch);
+    const double total = block_sum<S>(sums[accumulator_index(t, bin, size, bins, bin_major)], scratch);
     if (t == 0) partials[bin * Size{gridDim.x} + Size{blockIdx.x}] = total;
   }
 }
 // Fixed capacity of eight doubles; no dynamically indexed automatic array.
 // k and positions remain runtime inputs. Residency still requires binary evidence.
+template<int S = 0>
 __device__ __forceinline__ void register_first_stage_body(const cuda::std::complex<double>* state, Size count,
     const unsigned* positions, unsigned k, Size bins, double* partials, double* scratch) {
   double a0=0, a1=0, a2=0, a3=0, a4=0, a5=0, a6=0, a7=0;
@@ -104,17 +117,18 @@ __device__ __forceinline__ void register_first_stage_body(const cuda::std::compl
       case 4: value=a4; break; case 5: value=a5; break;
       case 6: value=a6; break; case 7: value=a7; break;
     }
-    const double total = block_sum(value, scratch);
+    const double total = block_sum<S>(value, scratch);
     if (threadIdx.x == 0) partials[bin * Size{gridDim.x} + Size{blockIdx.x}] = total;
   }
 }
+template<int S = 0>
 __device__ __forceinline__ void second_stage_body(const double* partials, double* output, Size bins, double* scratch) {
   const Size blocks = Size{gridDim.x};
   for (Size bin = Size{blockIdx.x}; bin < bins; bin += blocks) {
     double value = 0;
     for (Size block = Size{threadIdx.x}; block < blocks; block += Size{blockDim.x})
       value += partials[bin * blocks + block];
-    const double total = block_sum(value, scratch);
+    const double total = block_sum<S>(value, scratch);
     if (threadIdx.x == 0) output[bin] = total;
   }
 }
@@ -162,17 +176,59 @@ const void* cooperative_kernel(AccumulatorStorage storage) {
   }
   throw std::invalid_argument("unknown accumulator storage");
 }
-Size checked_blocks(const Config& c, AccumulatorStorage storage, ReductionMethod method) {
+template<int S, AccumulatorStorage Storage, bool Cooperative>
+__global__ void cub_stage(const cuda::std::complex<double>* state, Size count,
+    const unsigned* positions, unsigned k, Size bins, double* sums,
+    double* partials, double* output, bool bin_major) {
+  if constexpr (Storage == AccumulatorStorage::global)
+    first_stage_body<S>(state, count, positions, k, bins, sums, partials, bin_major, nullptr);
+  else if constexpr (Storage == AccumulatorStorage::shared)
+    shared_first_stage_body<S>(state, count, positions, k, bins, partials, bin_major, nullptr);
+  else
+    register_first_stage_body<S>(state, count, positions, k, bins, partials, nullptr);
+  if constexpr (Cooperative) {
+    cooperative_groups::this_grid().sync();
+    second_stage_body<S>(partials, output, bins, nullptr);
+  }
+}
+template<int S>
+__global__ void cub_second(const double* partials, double* output, Size bins) {
+  second_stage_body<S>(partials, output, bins, nullptr);
+}
+template<int S, bool Cooperative>
+const void* cub_first(AccumulatorStorage storage) {
+  switch (storage) {
+    case AccumulatorStorage::global: return reinterpret_cast<const void*>(cub_stage<S, AccumulatorStorage::global, Cooperative>);
+    case AccumulatorStorage::shared: return reinterpret_cast<const void*>(cub_stage<S, AccumulatorStorage::shared, Cooperative>);
+    case AccumulatorStorage::registers: return reinterpret_cast<const void*>(cub_stage<S, AccumulatorStorage::registers, Cooperative>);
+  }
+  throw std::invalid_argument("unknown accumulator storage");
+}
+template<int S>
+const void* cub_kernel(AccumulatorStorage storage, ReductionMethod method, bool second) {
+  if (method == ReductionMethod::cooperative) return cub_first<S, true>(storage);
+  return second ? reinterpret_cast<const void*>(cub_second<S>) : cub_first<S, false>(storage);
+}
+const void* cub_kernel(const Config& c, AccumulatorStorage storage, ReductionMethod method, bool second = false) {
+  switch (c.block_size) {
+    case 128: return cub_kernel<128>(storage, method, second);
+    case 256: return cub_kernel<256>(storage, method, second);
+    case 512: return cub_kernel<512>(storage, method, second);
+  }
+  throw std::invalid_argument("CUB BlockReduce supports S=128,256,512");
+}
+Size checked_blocks(const Config& c, AccumulatorStorage storage, ReductionMethod method, BlockPrimitive primitive) {
   c.validate();
+  if (primitive == BlockPrimitive::cub) require_audited_cub();
   if (storage == AccumulatorStorage::registers && c.bins() > 8)
     throw Unsupported("register capacity=8 doubles; supported runtime k=1..3; layout=n/a");
-  const auto resources = reduction_resources(c, storage, method);
+  const auto resources = reduction_resources(c, storage, method, primitive);
   if (storage == AccumulatorStorage::registers) {
     throw Unsupported(std::string("register capacity=8 doubles; runtime k=1..3; layout=n/a; residency unverified: ")
       + (method == ReductionMethod::cooperative
         ? "combined kernel has no independent compiler/disassembly audit; grid.sync atomic policy also unverified "
           "(vendor CUDA 12.9.79 uses atomic addition; see docs/cooperative-sync-audit.md); "
-        : "no compiler/disassembly audit for this build; ")
+        : "no independent compiler/disassembly audit for the selected custom/CUB kernel in this build; ")
       + resource_description(resources));
   }
   if (method == ReductionMethod::cooperative)
@@ -223,9 +279,12 @@ std::string resource_description(const ReductionResources& r) {
   }
   return out.str();
 }
-ReductionResources reduction_resources(const Config& c, AccumulatorStorage storage, ReductionMethod method) {
+ReductionResources reduction_resources(const Config& c, AccumulatorStorage storage, ReductionMethod method, BlockPrimitive primitive) {
   c.validate();
   storage_name(storage);
+  if (primitive != BlockPrimitive::custom && primitive != BlockPrimitive::cub)
+    throw std::invalid_argument("unknown block primitive");
+  if (primitive == BlockPrimitive::cub) require_audited_cub();
   if (method != ReductionMethod::two_kernel && method != ReductionMethod::cooperative)
     throw std::invalid_argument("unknown reduction method");
   int device;
@@ -244,10 +303,10 @@ ReductionResources reduction_resources(const Config& c, AccumulatorStorage stora
       c.block_size > static_cast<unsigned>(prop.maxThreadsPerBlock) ||
       c.block_size > static_cast<unsigned>(prop.maxThreadsDim[0]))
     throw Unsupported("requested grid or block exceeds device limits");
-  const void* first = r.cooperative ? cooperative_kernel(storage) : storage == AccumulatorStorage::global ? reinterpret_cast<const void*>(first_stage)
+  const void* first = primitive == BlockPrimitive::cub ? cub_kernel(c, storage, method) : r.cooperative ? cooperative_kernel(storage) : storage == AccumulatorStorage::global ? reinterpret_cast<const void*>(first_stage)
     : storage == AccumulatorStorage::shared ? reinterpret_cast<const void*>(shared_first_stage)
     : reinterpret_cast<const void*>(register_first_stage);
-  const void* second = r.cooperative ? first : reinterpret_cast<const void*>(second_stage);
+  const void* second = primitive == BlockPrimitive::cub ? cub_kernel(c, storage, method, true) : r.cooperative ? first : reinterpret_cast<const void*>(second_stage);
   cudaFuncAttributes fa{}, sa{};
   cuda_check(cudaFuncGetAttributes(&fa, first));
   cuda_check(cudaFuncGetAttributes(&sa, second));
@@ -303,8 +362,8 @@ const char* layout_name(GlobalLayout layout) {
   }
   throw std::invalid_argument("unknown global accumulator layout");
 }
-GlobalReduction::GlobalReduction(const Config& c, GlobalLayout layout, AccumulatorStorage storage, ReductionMethod method)
-  : config_(c), layout_(layout), storage_(storage), method_(method), blocks_(checked_blocks(c, storage, method)),
+GlobalReduction::GlobalReduction(const Config& c, GlobalLayout layout, AccumulatorStorage storage, ReductionMethod method, BlockPrimitive primitive)
+  : config_(c), layout_(layout), storage_(storage), method_(method), primitive_(primitive), blocks_(checked_blocks(c, storage, method, primitive)),
     threads_(checked_mul(blocks_, Size{c.block_size})), positions_(c.positions.size()),
     sums_(storage == AccumulatorStorage::global ? checked_mul(threads_, c.bins()) : 0), partials_(checked_mul(blocks_, c.bins())),
     output_(c.bins()) {
@@ -317,9 +376,31 @@ GlobalReduction::GlobalReduction(const Config& c, GlobalLayout layout, Accumulat
 void GlobalReduction::execute(const DeviceState& state, cudaStream_t stream) {
   if (state.size() != config_.state_size()) throw std::invalid_argument("device state size mismatch");
   const auto grid = static_cast<unsigned>(blocks_);
+  if (primitive_ == BlockPrimitive::cub) {
+    auto input = state.data();
+    Size count = state.size(), bins = config_.bins();
+    auto positions = positions_.data();
+    unsigned k = static_cast<unsigned>(config_.positions.size());
+    auto sums = sums_.data(), partials = partials_.data(), output = output_.data();
+    bool bin_major = layout_ == GlobalLayout::bin_major;
+    void* args[] = {&input, &count, &positions, &k, &bins, &sums, &partials, &output, &bin_major};
+    if (method_ == ReductionMethod::cooperative) {
+      checked_blocks(config_, storage_, method_, primitive_);
+      cuda_check(cudaLaunchCooperativeKernel(cub_kernel(config_, storage_, method_), dim3(grid),
+        dim3(config_.block_size), args, dynamic_shared_, stream));
+    } else {
+      cuda_check(cudaLaunchKernel(cub_kernel(config_, storage_, method_), dim3(grid),
+        dim3(config_.block_size), args, dynamic_shared_, stream));
+      void* final_args[] = {&partials, &output, &bins};
+      cuda_check(cudaLaunchKernel(cub_kernel(config_, storage_, method_, true), dim3(grid),
+        dim3(config_.block_size), final_args, 0, stream));
+    }
+    cuda_check(cudaGetLastError());
+    return;
+  }
   if (method_ == ReductionMethod::cooperative) {
     // Recheck policy/resources before every enqueue, even if a future gate is added.
-    checked_blocks(config_, storage_, method_);
+    checked_blocks(config_, storage_, method_, primitive_);
     auto input = state.data();
     Size count = state.size(), bins = config_.bins();
     auto positions = positions_.data();

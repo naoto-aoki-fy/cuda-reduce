@@ -1,4 +1,6 @@
 #include "measurement/core.hpp"
+#include "measurement/gather.hpp"
+#include <algorithm>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -39,6 +41,58 @@ int main() {
         for (unsigned t = 0; t < k; ++t)
           if (j & (Size{1} << positions[t])) expected += Size{1} << t;
         require(bin_for(j, positions) == expected);
+      }
+    }
+    // Independent gather bijection and per-bin CPU comparison for every small k.
+    for (unsigned q = 1; q <= 8; ++q)
+    for (unsigned k = 1; k <= q; ++k) {
+      std::vector<std::vector<unsigned>> sets;
+      for (const auto& band : {"low", "middle", "high"})
+        sets.push_back(contiguous_positions(q, k, band));
+      std::vector<unsigned> scattered;
+      for (unsigned t = 0; t < k; ++t)
+        scattered.push_back(t % 2 ? t/2 : q - 1 - t/2);
+      sets.push_back(scattered);
+      for (auto positions : sets) for (bool reverse : {false, true}) {
+        if (reverse) std::reverse(positions.begin(), positions.end());
+        Config c; c.qubits = q; c.positions = positions;
+        GatherMap map(c);
+        std::vector<bool> seen(c.state_size(), false);
+        std::vector<std::complex<double>> values(c.state_size());
+        for (Size j = 0; j < values.size(); ++j) values[j] = {double(j % 7), double(j % 11)};
+        CpuReference reference(c);
+        reference.add_chunk(0, values.data(), values.size());
+        const auto expected = reference.finish();
+        std::vector<long double> actual(c.bins(), 0);
+        for (Size v = 0; v < c.state_size(); ++v) {
+          const Size j = map(static_cast<LogicalOffset>(v));
+          require(j < c.state_size() && !seen[j]);
+          seen[j] = true;
+          require(bin_for(j, positions) == v / map.length);
+          actual[v / map.length] += std::norm(values[j]);
+        }
+        require(std::all_of(seen.begin(), seen.end(), [](bool x) { return x; }));
+        require(actual == expected);
+      }
+    }
+    // Exercise signed-32-bit boundary arithmetic without allocating a state.
+    for (unsigned q : {31u, 32u}) {
+      Config c; c.qubits = q; c.positions = {30, 0, 15};
+      GatherMap map(c);
+      OffsetIterator offsets{{static_cast<LogicalOffset>(map.length)}, 0};
+      require(offsets[static_cast<LogicalOffset>(c.bins())] == static_cast<LogicalOffset>(c.state_size()));
+      for (LogicalOffset v : {(LogicalOffset{1} << 31) - 1, LogicalOffset{1} << 31,
+                              (LogicalOffset{1} << 31) + 1}) {
+        LogicalIterator<GatherMap, Size> it{map, v};
+        require((it + 7) - it == 7 && it[-1] == map(v - 1));
+        require((it + 1) > it && (it - 1) < it);
+        if (Size(v) >= c.state_size()) continue;
+        Size j = *it, remaining = 0;
+        unsigned t = 0;
+        for (unsigned bit = 0; bit < q; ++bit)
+          if (!(map.measured_mask & (Size{1} << bit)))
+            remaining |= ((j >> bit) & Size{1}) << t++;
+        require(bin_for(j, c.positions) * map.length + remaining == Size(v));
       }
     }
     std::cout << "host checks passed\n";

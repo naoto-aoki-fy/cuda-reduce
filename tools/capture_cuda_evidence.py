@@ -51,12 +51,19 @@ preprocess = (shlex.split(args.nvcc) + shlex.split(args.flags)
                  '-E', 'src/global_reduction.cu'])
 manifest['preprocess_command'] = preprocess
 manifest['preprocess_exit_code'] = capture('cooperative-preprocessed.ii', preprocess)
+# Preserve selected CUB APIs, policies and iterator/offset instantiations as well.
+cub_preprocess = preprocess[:-1] + ['src/cub_reduction.cu']
+manifest['cub_preprocess_command'] = cub_preprocess
+manifest['cub_preprocess_exit_code'] = capture('cub-preprocessed.ii', cub_preprocess)
+manifest['cub_policy'] = ('Source audit: CCCL/CUB 2.8.2; non-atomic warp reductions; '
+                          'segmented Sum with int64 offsets and lazy gather; '
+                          'register kernels require independent residency audit')
 status = capture('build.log', command)
 manifest['build_exit_code'] = status
 if status == 0:
     binary = folder / 'objects' / 'measurement_validate'
     manifest['binary_sha256'] = hashlib.sha256(binary.read_bytes()).hexdigest()
-    status = status or manifest['preprocess_exit_code']
+    status = status or manifest['preprocess_exit_code'] or manifest['cub_preprocess_exit_code']
     for name, option in [('sass.txt', '--dump-sass'), ('ptx.txt', '--dump-ptx'),
                          ('resources.txt', '--dump-resource-usage')]:
         code = capture(name, ['cuobjdump', option, str(binary)])
