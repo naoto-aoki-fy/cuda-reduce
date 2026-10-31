@@ -10,7 +10,7 @@ namespace column_reduce {
 constexpr unsigned block_size = 256, warps = 8, tile_channels = 32;
 enum class Mode { two_kernel, cooperative };
 enum class Status { success, invalid_argument, overflow, insufficient_workspace, cooperative_unsupported, cuda_error };
-struct Plan { uint64_t n=0, k=0, partitions=0, tiles=0, tasks=0; size_t workspace_bytes=0; unsigned blocks=0; int device=-1; Mode mode=Mode::two_kernel; };
+struct Plan { uint64_t n=0, k=0, partitions=0, tiles=0, tasks=0; size_t workspace_bytes=0; unsigned blocks=0, accumulators=1; int device=-1; Mode mode=Mode::two_kernel; };
 inline const char* status_string(Status s) { switch(s) { case Status::success:return "success"; case Status::invalid_argument:return "invalid argument"; case Status::overflow:return "size overflow"; case Status::insufficient_workspace:return "insufficient or misaligned workspace"; case Status::cooperative_unsupported:return "cooperative launch unsupported"; default:return "CUDA error"; } }
 inline bool mul(uint64_t a,uint64_t b,uint64_t& out) { if(b && a>UINT64_MAX/b) return false; out=a*b; return true; }
 inline uint64_t ceil_div(uint64_t x,uint64_t y) { return x/y+(x%y!=0); }
@@ -54,51 +54,69 @@ template<class AccT> struct PartialReader {
  __device__ uint64_t step(uint64_t rows) const { return rows; }
 };
 // All 256 threads participate in every call, including the barriers.
-template<class AccT,class Reader> __device__ void reduce_tile(Reader reader, AccT* output,uint64_t tile,uint64_t k,AccT* shared) {
+template<class AccT,unsigned Accumulators=1,class Reader> __device__ void reduce_tile(Reader reader, AccT* output,uint64_t tile,uint64_t k,AccT* shared) {
  unsigned lane=threadIdx.x%32, warp=threadIdx.x/32;
  unsigned width=1; uint64_t remaining=k-tile*32; while(width<32 && width<remaining) width*=2;
  unsigned ch=lane%width, row_in_warp=lane/width, rows_per_warp=32/width;
  uint64_t c=tile*32+ch, row=reader.start(warp*rows_per_warp+row_in_warp);
  uint64_t stride=reader.step(warps*rows_per_warp);
- AccT sum{};
- if(c<k) while(row<reader.count()) { sum += reader.read(row,c); if(reader.count()-row<=stride) break; row+=stride; }
+ static_assert(Accumulators==1 || Accumulators==2 || Accumulators==4,"unsupported accumulator count");
+ AccT sums[Accumulators]{};
+ if(c<k) {
+  bool more=row<reader.count();
+  while(more) {
+   // Distinct registers break the loop-carried addition dependency. Advance only
+   // after a valid load, using subtraction to avoid row/stride overflow at tails.
+   #pragma unroll
+   for(unsigned a=0;a<Accumulators;++a) {
+    if(more) {
+     sums[a] += reader.read(row,c);
+     more=reader.count()-row>stride;
+     if(more) row+=stride;
+    }
+   }
+  }
+ }
+ AccT sum=sums[0];
+ #pragma unroll
+ for(unsigned a=1;a<Accumulators;++a) sum+=sums[a];
  for(unsigned offset=width;offset<32;offset*=2) sum += shuffle_down(sum,offset);
  if(row_in_warp==0) shared[warp*32+ch]=sum;
  __syncthreads();
  if(warp==0 && lane<width && c<k) { AccT total{}; for(unsigned w=0;w<warps;++w) total+=shared[w*32+lane]; output[c]=total; }
  __syncthreads();
 }
-template<class InputT,class AccT,class Op> __device__ void reduce_input_tile(const InputT* in,AccT* partial,uint64_t n,uint64_t k,uint64_t part,uint64_t p,uint64_t tile,Op op,AccT* shared) {
+template<class InputT,class AccT,class Op,unsigned Accumulators=1> __device__ void reduce_input_tile(const InputT* in,AccT* partial,uint64_t n,uint64_t k,uint64_t part,uint64_t p,uint64_t tile,Op op,AccT* shared) {
  // The branch is uniform across the block; both readers use the same barriers.
  if(k==1) {
   ContiguousInputReader<InputT,AccT,Op> r{in,contiguous_rows(n,part,p),op};
-  reduce_tile<AccT>(r,partial+part*k,tile,k,shared);
+  reduce_tile<AccT,Accumulators>(r,partial+part*k,tile,k,shared);
  } else if(k==2 || k==4) {
   ContiguousColumnReader<InputT,AccT,Op> r{in,contiguous_rows(n,part,p),k,op};
-  reduce_tile<AccT>(r,partial+part*k,tile,k,shared);
+  reduce_tile<AccT,Accumulators>(r,partial+part*k,tile,k,shared);
  } else {
   InputReader<InputT,AccT,Op> r{in,n,k,part,p,op};
   reduce_tile<AccT>(r,partial+part*k,tile,k,shared);
  }
 }
-template<class InputT,class AccT,class Op> __global__ void first_kernel(const InputT* in,AccT* partial,uint64_t n,uint64_t k,uint64_t p,uint64_t tasks,Op op) {
+template<class InputT,class AccT,class Op,unsigned Accumulators=1> __global__ void first_kernel(const InputT* in,AccT* partial,uint64_t n,uint64_t k,uint64_t p,uint64_t tasks,Op op) {
  __shared__ double storage[warps*32*((sizeof(AccT)+sizeof(double)-1)/sizeof(double))]; AccT* shared=reinterpret_cast<AccT*>(storage);
- for(uint64_t t=blockIdx.x;t<tasks;) { uint64_t tile=t/p, part=t%p; reduce_input_tile(in,partial,n,k,part,p,tile,op,shared); if(tasks-t<=gridDim.x) break; t+=gridDim.x; }
+ for(uint64_t t=blockIdx.x;t<tasks;) { uint64_t tile=t/p, part=t%p; reduce_input_tile<InputT,AccT,Op,Accumulators>(in,partial,n,k,part,p,tile,op,shared); if(tasks-t<=gridDim.x) break; t+=gridDim.x; }
 }
 template<class AccT> __global__ void second_kernel(const AccT* partial,AccT* out,uint64_t k,uint64_t p,uint64_t tiles) {
  __shared__ double storage[warps*32*((sizeof(AccT)+sizeof(double)-1)/sizeof(double))]; AccT* shared=reinterpret_cast<AccT*>(storage); PartialReader<AccT> r{partial,k,p};
  for(uint64_t t=blockIdx.x;t<tiles;) { reduce_tile<AccT>(r,out,t,k,shared); if(tiles-t<=gridDim.x) break; t+=gridDim.x; }
 }
-template<class InputT,class AccT,class Op> __global__ void cooperative_kernel(const InputT* in,AccT* out,AccT* partial,uint64_t n,uint64_t k,uint64_t p,uint64_t tasks,uint64_t tiles,Op op) {
+template<class InputT,class AccT,class Op,unsigned Accumulators=1> __global__ void cooperative_kernel(const InputT* in,AccT* out,AccT* partial,uint64_t n,uint64_t k,uint64_t p,uint64_t tasks,uint64_t tiles,Op op) {
  __shared__ double storage[warps*32*((sizeof(AccT)+sizeof(double)-1)/sizeof(double))]; AccT* shared=reinterpret_cast<AccT*>(storage);
- for(uint64_t t=blockIdx.x;t<tasks;) { uint64_t tile=t/p,part=t%p; reduce_input_tile(in,partial,n,k,part,p,tile,op,shared); if(tasks-t<=gridDim.x) break; t+=gridDim.x; }
+ for(uint64_t t=blockIdx.x;t<tasks;) { uint64_t tile=t/p,part=t%p; reduce_input_tile<InputT,AccT,Op,Accumulators>(in,partial,n,k,part,p,tile,op,shared); if(tasks-t<=gridDim.x) break; t+=gridDim.x; }
  cooperative_groups::this_grid().sync();
  PartialReader<AccT> r{partial,k,p};
  for(uint64_t t=blockIdx.x;t<tiles;) { reduce_tile<AccT>(r,out,t,k,shared); if(tiles-t<=gridDim.x) break; t+=gridDim.x; }
 }
-template<class InputT,class AccT,class Op> Status make_plan(uint64_t n,uint64_t k,Mode mode,Plan& plan,cudaError_t* error=nullptr,unsigned sm_multiplier=8) {
- plan=Plan{}; plan.n=n; plan.k=k; plan.mode=mode; if(error) *error=cudaSuccess;
- if(!sm_multiplier) return Status::invalid_argument;
+template<class InputT,class AccT,class Op> Status make_plan(uint64_t n,uint64_t k,Mode mode,Plan& plan,cudaError_t* error=nullptr,unsigned sm_multiplier=8,unsigned accumulators=1) {
+ plan=Plan{}; plan.n=n; plan.k=k; plan.mode=mode; plan.accumulators=accumulators; if(error) *error=cudaSuccess;
+ if(!sm_multiplier || (accumulators!=1 && accumulators!=2 && accumulators!=4)) return Status::invalid_argument;
  if(!k) return Status::success;
  uint64_t elements, bytes, partials;
  if(!mul(n,k,elements) || !mul(elements,sizeof(InputT),bytes) || bytes>SIZE_MAX || !mul(k,sizeof(AccT),bytes) || bytes>SIZE_MAX) return Status::overflow;
@@ -109,7 +127,10 @@ template<class InputT,class AccT,class Op> Status make_plan(uint64_t n,uint64_t 
  limit=std::min<uint64_t>(limit,static_cast<uint64_t>(prop.maxGridSize[0]));
  if(mode==Mode::cooperative) {
   if(!prop.cooperativeLaunch) return Status::cooperative_unsupported;
-  int active=0; e=cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active,cooperative_kernel<InputT,AccT,Op>,block_size,0);
+  int active=0;
+  if(accumulators==2) e=cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active,cooperative_kernel<InputT,AccT,Op,2>,block_size,0);
+  else if(accumulators==4) e=cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active,cooperative_kernel<InputT,AccT,Op,4>,block_size,0);
+  else e=cudaOccupancyMaxActiveBlocksPerMultiprocessor(&active,cooperative_kernel<InputT,AccT,Op,1>,block_size,0);
   if(e!=cudaSuccess) { if(error)*error=e; return Status::cuda_error; }
   if(active<=0) return Status::cooperative_unsupported;
   limit=std::min<uint64_t>(limit,uint64_t(active)*prop.multiProcessorCount);
@@ -121,14 +142,14 @@ template<class InputT,class AccT,class Op> Status make_plan(uint64_t n,uint64_t 
  plan.workspace_bytes=static_cast<size_t>(bytes);
  plan.blocks=static_cast<unsigned>(std::min<uint64_t>(plan.tasks,limit)); return plan.blocks?Status::success:Status::invalid_argument;
 }
-template<class InputT,class AccT,class Op> Status execute(const Plan& plan,const InputT* input,AccT* output,Op op,cudaStream_t stream,void* workspace,size_t workspace_bytes,cudaError_t* error=nullptr) {
+template<class InputT,class AccT,class Op,unsigned Accumulators> Status execute_variant(const Plan& plan,const InputT* input,AccT* output,Op op,cudaStream_t stream,void* workspace,size_t workspace_bytes,cudaError_t* error=nullptr) {
  if(error)*error=cudaSuccess; if(!plan.k) return Status::success;
  if(!output || (plan.n && !input) || !plan.blocks || !plan.partitions || !plan.tasks) return Status::invalid_argument;
  if(!workspace || workspace_bytes<plan.workspace_bytes || reinterpret_cast<uintptr_t>(workspace)%alignof(AccT)) return Status::insufficient_workspace;
  int device; cudaError_t e=cudaGetDevice(&device); if(e!=cudaSuccess) { if(error)*error=e; return Status::cuda_error; } if(device!=plan.device) return Status::invalid_argument;
  AccT* partial=static_cast<AccT*>(workspace);
  if(plan.mode==Mode::two_kernel) {
-  first_kernel<InputT,AccT,Op><<<plan.blocks,block_size,0,stream>>>(input,partial,plan.n,plan.k,plan.partitions,plan.tasks,op);
+  first_kernel<InputT,AccT,Op,Accumulators><<<plan.blocks,block_size,0,stream>>>(input,partial,plan.n,plan.k,plan.partitions,plan.tasks,op);
   e=cudaGetLastError(); if(e==cudaSuccess) {
    unsigned second_blocks=static_cast<unsigned>(std::min<uint64_t>(plan.blocks,plan.tiles));
    second_kernel<AccT><<<second_blocks,block_size,0,stream>>>(partial,output,plan.k,plan.partitions,plan.tiles); e=cudaGetLastError();
@@ -136,8 +157,18 @@ template<class InputT,class AccT,class Op> Status execute(const Plan& plan,const
  } else {
   auto n=plan.n,k=plan.k,p=plan.partitions,tasks=plan.tasks,tiles=plan.tiles;
   void* args[]={&input,&output,&partial,&n,&k,&p,&tasks,&tiles,&op};
-  e=cudaLaunchCooperativeKernel((void*)cooperative_kernel<InputT,AccT,Op>,dim3(plan.blocks),dim3(block_size),args,0,stream);
+  e=cudaLaunchCooperativeKernel((void*)cooperative_kernel<InputT,AccT,Op,Accumulators>,dim3(plan.blocks),dim3(block_size),args,0,stream);
  }
  if(e!=cudaSuccess) { if(error)*error=e; return Status::cuda_error; } return Status::success;
+}
+// Dispatch once on the host; the element loop has a compile-time accumulator count.
+template<class InputT,class AccT,class Op> Status execute(const Plan& plan,const InputT* input,AccT* output,Op op,cudaStream_t stream,void* workspace,size_t workspace_bytes,cudaError_t* error=nullptr) {
+ if(error) *error=cudaSuccess;
+ switch(plan.accumulators) {
+  case 1: return execute_variant<InputT,AccT,Op,1>(plan,input,output,op,stream,workspace,workspace_bytes,error);
+  case 2: return execute_variant<InputT,AccT,Op,2>(plan,input,output,op,stream,workspace,workspace_bytes,error);
+  case 4: return execute_variant<InputT,AccT,Op,4>(plan,input,output,op,stream,workspace,workspace_bytes,error);
+  default: return Status::invalid_argument;
+ }
 }
 }
