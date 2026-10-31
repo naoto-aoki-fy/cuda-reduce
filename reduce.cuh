@@ -25,6 +25,20 @@ template<class InputT,class AccT,class Op> struct InputReader {
  __device__ uint64_t start(uint64_t r) const { return partition + r*partitions; }
  __device__ uint64_t step(uint64_t rows) const { return rows*partitions; }
 };
+struct RowRange { uint64_t begin, length; };
+// Requires partitions > 0 and partition < partitions. Products and sums are <= n.
+__host__ __device__ inline RowRange contiguous_rows(uint64_t n,uint64_t partition,uint64_t partitions) {
+ uint64_t q=n/partitions, rem=n%partitions;
+ return {partition*q+(partition<rem?partition:rem),q+(partition<rem)};
+}
+template<class InputT,class AccT,class Op> struct ContiguousInputReader {
+ const InputT* input; RowRange range; Op op;
+ // Local row indices keep inactive threads from overflowing begin + row.
+ __device__ AccT read(uint64_t row,uint64_t) const { return static_cast<AccT>(op(input[range.begin+row])); }
+ __device__ uint64_t count() const { return range.length; }
+ __device__ uint64_t start(uint64_t r) const { return r; }
+ __device__ uint64_t step(uint64_t rows) const { return rows; }
+};
 template<class AccT> struct PartialReader {
  const AccT* data; uint64_t k,partitions;
  __device__ AccT read(uint64_t row,uint64_t c) const { return data[row*k+c]; }
@@ -47,9 +61,19 @@ template<class AccT,class Reader> __device__ void reduce_tile(Reader reader, Acc
  if(warp==0 && lane<width && c<k) { AccT total{}; for(unsigned w=0;w<warps;++w) total+=shared[w*32+lane]; output[c]=total; }
  __syncthreads();
 }
+template<class InputT,class AccT,class Op> __device__ void reduce_input_tile(const InputT* in,AccT* partial,uint64_t n,uint64_t k,uint64_t part,uint64_t p,uint64_t tile,Op op,AccT* shared) {
+ // The branch is uniform across the block; both readers use the same barriers.
+ if(k==1) {
+  ContiguousInputReader<InputT,AccT,Op> r{in,contiguous_rows(n,part,p),op};
+  reduce_tile<AccT>(r,partial+part*k,tile,k,shared);
+ } else {
+  InputReader<InputT,AccT,Op> r{in,n,k,part,p,op};
+  reduce_tile<AccT>(r,partial+part*k,tile,k,shared);
+ }
+}
 template<class InputT,class AccT,class Op> __global__ void first_kernel(const InputT* in,AccT* partial,uint64_t n,uint64_t k,uint64_t p,uint64_t tasks,Op op) {
  __shared__ double storage[warps*32*((sizeof(AccT)+sizeof(double)-1)/sizeof(double))]; AccT* shared=reinterpret_cast<AccT*>(storage);
- for(uint64_t t=blockIdx.x;t<tasks;) { uint64_t tile=t/p, part=t%p; InputReader<InputT,AccT,Op> r{in,n,k,part,p,op}; reduce_tile<AccT>(r,partial+part*k,tile,k,shared); if(tasks-t<=gridDim.x) break; t+=gridDim.x; }
+ for(uint64_t t=blockIdx.x;t<tasks;) { uint64_t tile=t/p, part=t%p; reduce_input_tile(in,partial,n,k,part,p,tile,op,shared); if(tasks-t<=gridDim.x) break; t+=gridDim.x; }
 }
 template<class AccT> __global__ void second_kernel(const AccT* partial,AccT* out,uint64_t k,uint64_t p,uint64_t tiles) {
  __shared__ double storage[warps*32*((sizeof(AccT)+sizeof(double)-1)/sizeof(double))]; AccT* shared=reinterpret_cast<AccT*>(storage); PartialReader<AccT> r{partial,k,p};
@@ -57,7 +81,7 @@ template<class AccT> __global__ void second_kernel(const AccT* partial,AccT* out
 }
 template<class InputT,class AccT,class Op> __global__ void cooperative_kernel(const InputT* in,AccT* out,AccT* partial,uint64_t n,uint64_t k,uint64_t p,uint64_t tasks,uint64_t tiles,Op op) {
  __shared__ double storage[warps*32*((sizeof(AccT)+sizeof(double)-1)/sizeof(double))]; AccT* shared=reinterpret_cast<AccT*>(storage);
- for(uint64_t t=blockIdx.x;t<tasks;) { uint64_t tile=t/p,part=t%p; InputReader<InputT,AccT,Op> r{in,n,k,part,p,op}; reduce_tile<AccT>(r,partial+part*k,tile,k,shared); if(tasks-t<=gridDim.x) break; t+=gridDim.x; }
+ for(uint64_t t=blockIdx.x;t<tasks;) { uint64_t tile=t/p,part=t%p; reduce_input_tile(in,partial,n,k,part,p,tile,op,shared); if(tasks-t<=gridDim.x) break; t+=gridDim.x; }
  cooperative_groups::this_grid().sync();
  PartialReader<AccT> r{partial,k,p};
  for(uint64_t t=blockIdx.x;t<tiles;) { reduce_tile<AccT>(r,out,t,k,shared); if(tiles-t<=gridDim.x) break; t+=gridDim.x; }

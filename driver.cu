@@ -46,6 +46,30 @@ template<class Input,class Acc,class Op> void check_case(uint64_t n,uint64_t k,O
 void require_plan(bool condition,const char* message) {
  if(!condition) { fprintf(stderr,"FAIL planning: %s\n",message); exit(1); }
 }
+void contiguous_partition_tests() {
+ using namespace column_reduce;
+ for(uint64_t n:{uint64_t(0),uint64_t(1),uint64_t(7),uint64_t(255),uint64_t(256),uint64_t(257),uint64_t(4097),UINT64_MAX}) {
+  for(uint64_t p:{uint64_t(1),uint64_t(2),uint64_t(3),uint64_t(7),uint64_t(1216)}) {
+   uint64_t end=0;
+   for(uint64_t part=0;part<p;++part) {
+    auto range=contiguous_rows(n,part,p);
+    require_plan(range.begin==end,"contiguous partitions have no gaps or overlaps");
+    require_plan(range.length==n/p+(part<n%p),"balanced partition length");
+    require_plan(range.begin<=n && range.length<=n-range.begin,"partition stays within input");
+    end=range.begin+range.length;
+   }
+   require_plan(end==n,"partitions cover every row, including empty and short inputs");
+  }
+  // Very large partition counts exercise the overflow-safe boundary formula.
+  for(uint64_t p:{UINT64_MAX/2+1,UINT64_MAX}) for(uint64_t part:{uint64_t(0),uint64_t(1),p/2,p-1}) {
+   auto range=contiguous_rows(n,part,p);
+   require_plan(range.begin<=n && range.length<=n-range.begin,"large partition boundary stays within input");
+   if(part==0) require_plan(range.begin==0,"first partition starts at zero");
+   if(part==p-1) require_plan(range.begin+range.length==n,"last partition ends at n");
+   else require_plan(range.begin+range.length==contiguous_rows(n,part+1,p).begin,"large partitions meet exactly");
+  }
+ }
+}
 // Planning-only checks include the 2^30-row case without allocating its input.
 void planning_tests() {
  using namespace column_reduce;
@@ -89,13 +113,21 @@ void planning_tests() {
   }
  }
  require_plan((make_plan<double,double,Identity>(uint64_t(1)<<30,1,Mode::two_kernel,plan)==Status::success),"default plan");
- require_plan(plan.blocks==std::min<uint64_t>(std::min<uint64_t>(uint64_t(prop.multiProcessorCount)*4,prop.maxGridSize[0]),uint64_t(1)<<22),"default multiplier is four");
+ require_plan(plan.blocks==std::min<uint64_t>(std::min<uint64_t>(uint64_t(prop.multiProcessorCount)*8,prop.maxGridSize[0]),uint64_t(1)<<22),"default multiplier is eight");
  printf("Planning tests passed; N=2^30 K=1 first-stage grid=%u blocks of %u threads (%d SMs).\n",plan.blocks,block_size,prop.multiProcessorCount);
 }
 void tests(bool quick) {
+ contiguous_partition_tests();
  planning_tests();
  const uint64_t ks[]={0,1,2,3,4,5,7,16,31,32,33,65,257}; const uint64_t ns[]={0,1,7,259,4097};
  for(auto k:ks) for(auto n:ns) { if(quick && n>259) continue; check_case<double,double>(n,k,Identity{}); check_case<float,double>(n,k,Identity{}); check_case<C,double>(n,k,Norm{}); check_case<C,C>(n,k,Identity{}); check_case<double,double>(n,k,Shift{2.5}); }
+ // Exercise exact and uneven row splits around the 256-thread boundary.
+ for(uint64_t n:{uint64_t(255),uint64_t(256),uint64_t(257),uint64_t(511),uint64_t(512),uint64_t(513),uint64_t(769)}) for(uint64_t k:{uint64_t(1),uint64_t(2)}) {
+  check_case<double,double>(n,k,Shift{2.5});
+  check_case<float,double>(n,k,Identity{});
+  check_case<C,double>(n,k,Norm{});
+  check_case<C,C>(n,k,Identity{});
+ }
  for(unsigned multiplier:{1u,4u,7u}) {
   check_case<double,double>(8193,1,Shift{2.5},multiplier);
   if(!quick) for(uint64_t k:{uint64_t(1),uint64_t(3),uint64_t(33)}) {
