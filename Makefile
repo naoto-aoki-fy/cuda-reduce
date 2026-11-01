@@ -38,7 +38,7 @@ $(BUILD)/global_reduction.o: src/global_reduction.cu include/measurement/cuda.hp
 $(BUILD)/cub_reduction.o: src/cub_reduction.cu include/measurement/gather.hpp include/measurement/cuda.hpp include/measurement/core.hpp | $(BUILD)
 	$(NVCC) $(CPPFLAGS) $(NVCCFLAGS) -std=c++17 -MMD -MP -c $< -o $@
 
-$(CUDA_OBJECT): $(BUILD)/build_info.hpp
+$(CUDA_OBJECT) $(HOST_OBJECT): $(BUILD)/build_info.hpp
 
 $(BUILD)/main.o: src/main.cu $(BUILD)/build_info.hpp include/measurement/cuda.hpp include/measurement/gather.hpp include/measurement/core.hpp | $(BUILD)
 	$(NVCC) $(CPPFLAGS) $(NVCCFLAGS) -std=c++17 -MMD -MP -c $< -o $@
@@ -56,8 +56,13 @@ $(BUILD)/test_cub: tests/cub.cu $(CUDA_OBJECT) $(BUILD)/libmeasurement_core.a
 	$(NVCC) $(CPPFLAGS) $(NVCCFLAGS) -std=c++17 $^ -lcurand -o $@
 
 test: test-host
-test-host: $(BUILD)/test_core
+$(BUILD)/test_benchmark: tests/benchmark.cpp include/measurement/benchmark.hpp $(BUILD)/libmeasurement_core.a
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -std=c++17 $< $(BUILD)/libmeasurement_core.a -o $@
+
+test-host: $(BUILD)/test_core $(BUILD)/test_benchmark
 	./$(BUILD)/test_core
+	./$(BUILD)/test_benchmark
+	python3 -m unittest discover -s tests -p 'test_*.py'
 test-cuda: $(BUILD)/test_reduction $(BUILD)/test_cub
 	./$(BUILD)/test_reduction
 	./$(BUILD)/test_cub
@@ -83,13 +88,25 @@ cuda-evidence:
 $(BUILD)/build_info.hpp: export MEASUREMENT_NVCC = $(NVCC)
 $(BUILD)/build_info.hpp: export MEASUREMENT_NVCCFLAGS = $(NVCCFLAGS)
 $(BUILD)/build_info.hpp: export MEASUREMENT_CPPFLAGS = $(CPPFLAGS)
+$(BUILD)/build_info.hpp: export MEASUREMENT_CXX = $(CXX)
+$(BUILD)/build_info.hpp: export MEASUREMENT_CXXFLAGS = $(CXXFLAGS)
 $(BUILD)/build_info.hpp: FORCE | $(BUILD)
 	python3 tools/build_info.py $@
 
+BENCHMARK_RESULTS ?= $(BUILD)/full
 BENCHMARK_ARGS ?=
 benchmark-smoke: cuda
 	./$(BUILD)/measurement_validate --preset smoke --results $(BUILD)/smoke $(BENCHMARK_ARGS)
+# Planning/recovery uses only Python and never builds or requires CUDA.
+ifneq ($(filter --matrix-config --recover,$(BENCHMARK_ARGS)),)
+ifeq ($(filter --dry-run --recover,$(BENCHMARK_ARGS)),)
 benchmark-full: cuda
-	./$(BUILD)/measurement_validate --preset full --results $(BUILD)/full $(BENCHMARK_ARGS)
+endif
+benchmark-full:
+	python3 tools/benchmark_matrix.py --binary $(BUILD)/measurement_validate --results $(BENCHMARK_RESULTS) $(BENCHMARK_ARGS)
+else
+benchmark-full: cuda
+	./$(BUILD)/measurement_validate --preset full --results $(BENCHMARK_RESULTS) $(BENCHMARK_ARGS)
+endif
 profile: cuda
 	python3 tools/profile_benchmark.py --binary $(BUILD)/measurement_validate $(PROFILE_ARGS)

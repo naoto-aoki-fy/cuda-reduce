@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "q": [
+    20,
+    28
+  ],
+  "k": [
+    3,
+    6,
+    12
+  ],
+  "positions": {
+    "patterns": [
+      "all_contiguous",
+      "alternating",
+      "mixed",
+      "distant",
+      "random"
+    ],
+    "random_count": 4,
+    "seed": 20261031,
+    "reverse": true
+  },
+  "candidates": {
+    "include": [
+      {
+        "method": "custom",
+        "storage": "global",
+        "layout": "thread_major",
+        "block_size": 256,
+        "sm_multiplier": 4,
+        "strategy": "two_kernel"
+      },
+      {
+        "method": "cub",
+        "storage": "shared",
+        "layout": "thread_major",
+        "block_size": 256,
+        "sm_multiplier": 4,
+        "strategy": "two_kernel"
+      },
+      {
+        "method": "segmented"
+      }
+    ]
+  },
+  "measurement": {
+    "seed": 20261031,
+    "scheduling_seed": 20261101,
+    "repetitions": 1,
+    "warmups": 3,
+    "memory_reserve_bytes": 536870912,
+    "workspace_limit_bytes": 8589934592
+  }
+}

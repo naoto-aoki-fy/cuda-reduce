@@ -75,6 +75,7 @@ Config parse_config(int argc, const char* const* argv) {
     else if (key == "--repetitions") c.repetitions = number(value);
     else if (key == "--warmups") c.warmups = number(value);
     else if (key == "--seed") c.seed = number(value);
+    else if (key == "--case-budget-ms") c.case_budget_ms = number(value);
     else if (key == "--chunk-elements") c.chunk_elements = number(value);
     else throw std::invalid_argument("unknown option: " + std::string(key));
   }

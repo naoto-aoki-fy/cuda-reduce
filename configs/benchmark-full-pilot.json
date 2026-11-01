@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "q": [
+    20,
+    28
+  ],
+  "k": [
+    1,
+    3,
+    5,
+    6,
+    8,
+    12,
+    14,
+    16
+  ],
+  "positions": {
+    "patterns": [
+      "low",
+      "middle",
+      "high"
+    ]
+  },
+  "candidates": {
+    "methods": [
+      "custom",
+      "cub",
+      "segmented"
+    ],
+    "storage": [
+      "shared",
+      "global"
+    ],
+    "layouts": [
+      "thread_major",
+      "bin_major"
+    ],
+    "block_sizes": [
+      128,
+      256,
+      512
+    ],
+    "sm_multipliers": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "strategies": [
+      "two_kernel"
+    ]
+  },
+  "measurement": {
+    "seed": 20261031,
+    "scheduling_seed": 20261101,
+    "repetitions": 1,
+    "warmups": 3,
+    "memory_reserve_bytes": 536870912,
+    "workspace_limit_bytes": 8589934592
+  }
+}

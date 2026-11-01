@@ -1,7 +1,9 @@
 #include "measurement/cuda.hpp"
+#include "measurement/benchmark.hpp"
 #include "build_info.hpp"
 #include <cuda_profiler_api.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <iomanip>
@@ -46,102 +48,6 @@ std::string csv(const std::string& s) {
   std::string r = "\"";
   for (char c : s) { if (c == '"') r += '"'; r += c; }
   return r + '"';
-}
-struct Options {
-  Config config;
-  std::string preset = "single", prefix = "benchmark";
-  std::vector<unsigned> blocks;
-  std::optional<Size> profile_case;
-  bool validate = true;
-};
-Options options(int argc, char** argv) {
-  Options o;
-  std::vector<const char*> args{argv[0]};
-  bool qubits = false, positions = false, multiplier = false;
-  for (int i = 1; i < argc; i += 2) {
-    if (i + 1 == argc) throw std::invalid_argument("missing option value");
-    std::string key = argv[i], value = argv[i+1];
-    if (key == "--preset") o.preset = value;
-    else if (key == "--results") o.prefix = value;
-    else if (key == "--validation") {
-      if (value != "full" && value != "skip") throw std::invalid_argument("validation: full or skip");
-      o.validate = value == "full";
-    } else if (key == "--profile-case") {
-      const char* a[] = {argv[0], "--seed", argv[i+1]};
-      o.profile_case = parse_config(3, a).seed;
-    } else if (key == "--block-sizes") {
-      std::string token;
-      std::istringstream list(value);
-      while (std::getline(list, token, ',')) {
-        const char* a[] = {argv[0], "--block-size", token.c_str()};
-        unsigned block = parse_config(3, a).block_size;
-        if (std::find(o.blocks.begin(), o.blocks.end(), block) != o.blocks.end())
-          throw std::invalid_argument("duplicate block size");
-        o.blocks.push_back(block);
-      }
-      if (o.blocks.empty() || value.back() == ',') throw std::invalid_argument("empty block size");
-    } else {
-      qubits |= key == "--qubits"; positions |= key == "--positions";
-      multiplier |= key == "--sm-multiplier";
-      args.push_back(argv[i]); args.push_back(argv[i+1]);
-    }
-  }
-  o.config = parse_config(static_cast<int>(args.size()), args.data());
-  if (o.preset != "full" && o.preset != "smoke" && o.preset != "single")
-    throw std::invalid_argument("preset: single, smoke or full");
-  if (o.preset != "single" && (positions || multiplier))
-    throw std::invalid_argument("matrix preset owns positions and SM multipliers");
-  if (o.preset == "full") {
-    if (qubits) throw std::invalid_argument("full preset fixes q=31; use smoke for smaller input");
-    o.config.qubits = 31;
-  }
-  if (o.blocks.empty()) o.blocks.push_back(o.config.block_size);
-  o.config.validate();
-  return o;
-}
-struct Case {
-  Config c;
-  std::size_t reference;
-  std::string band;
-  BlockPrimitive primitive;
-  AccumulatorStorage storage;
-  GlobalLayout layout;
-  ReductionMethod method;
-  bool segmented;
-};
-struct Matrix {
-  std::vector<Config> references;
-  std::vector<Case> cases;
-};
-Matrix matrix(const Options& o) {
-  Matrix m;
-  auto add = [&](Config c, const std::string& band) {
-    const auto ref = m.references.size();
-    m.references.push_back(c);
-    for (unsigned block : o.blocks)
-    for (Size mult : o.preset == "single" ? std::vector<Size>{c.sm_multiplier} : std::vector<Size>{1,2,4,8,16})
-    for (auto primitive : {BlockPrimitive::custom, BlockPrimitive::cub})
-    for (auto storage : {AccumulatorStorage::registers, AccumulatorStorage::shared, AccumulatorStorage::global})
-    for (auto layout : {GlobalLayout::thread_major, GlobalLayout::bin_major}) {
-      if (storage == AccumulatorStorage::registers && layout == GlobalLayout::bin_major) continue;
-      for (auto method : {ReductionMethod::two_kernel, ReductionMethod::cooperative}) {
-        c.block_size = block; c.sm_multiplier = mult;
-        m.cases.push_back({c, ref, band, primitive, storage, layout, method, false});
-      }
-    }
-    // No repetition across irrelevant custom tuning dimensions.
-    m.cases.push_back({m.references[ref], ref, band, BlockPrimitive::cub,
-      AccumulatorStorage::global, GlobalLayout::thread_major, ReductionMethod::two_kernel, true});
-  };
-  if (o.preset == "single") add(o.config, "ordered");
-  else for (unsigned k = 1;
-            k <= std::min(o.preset == "full" ? max_measurement_qubits : 8u, o.config.qubits); ++k)
-    for (const auto& band : {"low", "middle", "high"}) {
-      Config c = o.config;
-      c.positions = contiguous_positions(c.qubits, k, band);
-      add(c, band);
-    }
-  return m;
 }
 struct ProfileRange {
   ProfileRange() { cuda_check(cudaProfilerStart()); }
@@ -219,13 +125,15 @@ Fields row_template(const Case& x, Size id, const Options& o) {
   for (const auto* field : {"mean_ms", "min_ms", "median_ms", "max_ms", "sample_stddev_ms",
     "input_effective_GB_per_s", "max_absolute_error", "max_relative_error", "reference_total_norm",
     "total_norm_absolute_error", "workspace_bytes", "total_live_device_bytes", "blocks",
-    "compiler_spill_loads", "compiler_spill_stores", "achieved_occupancy", "dram_read_bytes", "dram_write_bytes"})
+    "estimated_workspace_bytes", "compiler_spill_loads", "compiler_spill_stores", "achieved_occupancy", "dram_read_bytes", "dram_write_bytes"})
     row[field] = "null";
   for (unsigned stage : {1u, 2u}) for (const auto* field : {"binary_architecture", "ptx_architecture", "registers_per_thread", "local_bytes_per_thread",
     "static_shared_bytes_per_block", "dynamic_shared_bytes_per_block", "active_blocks_per_sm", "theoretical_occupancy"})
     row["stage" + std::to_string(stage) + '_' + field] = "null";
   row["case_id"] = number(id); row["preset"] = json_quote(o.preset);
   row["N"] = number(x.c.state_size()); row["state_bytes"] = number(allocation_bytes(x.c.state_size(), sizeof(cuda::std::complex<double>)));
+  row["q"] = number(x.c.qubits); row["bins"] = number(x.c.bins());
+  row["completed_repetitions"] = "0"; row["timing_mode"] = json_quote("single_invocation");
   row["k"] = number(x.c.positions.size()); row["positions"] = array(x.c.positions); row["band"] = json_quote(x.band);
   row["seed"] = number(x.c.seed); row["chunk_elements"] = number(x.c.chunk_elements);
   row["repetitions"] = number(x.c.repetitions); row["warmups"] = number(x.c.warmups);
@@ -275,6 +183,7 @@ class Writer {
 }
 int main(int argc, char** argv) {
   try {
+    const auto run_start = std::chrono::steady_clock::now();
     const auto o = options(argc, argv);
     const auto m = matrix(o);
     if (o.profile_case && *o.profile_case >= m.cases.size()) throw std::invalid_argument("profile case outside matrix");
@@ -304,7 +213,21 @@ int main(int argc, char** argv) {
       metadata["CUDA_runtime"] = number(runtime); metadata["CUDA_driver"] = number(driver); metadata["cuRAND"] = number(curand);
       std::size_t free, total; cuda_check(cudaMemGetInfo(&free, &total));
       metadata["initial_free_device_bytes"] = number(free); metadata["total_device_bytes"] = number(total);
+      char pci[64]{}; cuda_check(cudaDeviceGetPCIBusId(pci, sizeof(pci), device));
+      metadata["device_identifier"] = json_quote(pci);
+      std::ostringstream uuid;
+      uuid << std::hex << std::setfill('0');
+      for (unsigned char byte : prop.uuid.bytes) uuid << std::setw(2) << unsigned(byte);
+      metadata["device_uuid"] = json_quote(uuid.str());
+      metadata["L2_bytes"] = number(prop.l2CacheSize);
+      metadata["shared_memory_per_block"] = number(prop.sharedMemPerBlock);
+      metadata["shared_memory_optin_per_block"] = number(prop.sharedMemPerBlockOptin);
+      metadata["shared_memory_per_SM"] = number(prop.sharedMemPerMultiprocessor);
+      if (o.device_info) { std::cout << json(metadata) << '\n'; return 0; }
       stream = std::make_unique<Stream>();
+      Size input_bytes = allocation_bytes(o.config.state_size(), sizeof(cuda::std::complex<double>));
+      Size draws = allocation_bytes(std::min(o.config.state_size(), Size{1} << 20), 16);
+      preflight_device_bytes(checked_add(checked_add(input_bytes, draws), o.memory_reserve));
       std::cout << "Generating one read-only input; N=" << o.config.state_size() << '\n';
       state = std::make_unique<DeviceState>(generate_state(o.config));
       if (o.validate) {
@@ -313,6 +236,7 @@ int main(int argc, char** argv) {
       }
     } catch (const Unsupported& e) { startup = Status::unsupported; startup_reason = e.what(); }
       catch (const std::exception& e) { startup = Status::failure; startup_reason = e.what(); }
+    if (o.device_info) throw std::runtime_error("device query failed: " + startup_reason);
     metadata["startup_status"] = json_quote(status_name(startup));
     metadata["startup_reason"] = json_quote(startup_reason);
     Writer writer(o.prefix, metadata);
@@ -327,6 +251,10 @@ int main(int argc, char** argv) {
       for (const auto& p : metadata) row["run_" + p.first] = p.second;
       Status status = Status::not_run;
       if (o.profile_case && id != *o.profile_case) row["reason"] = json_quote("not selected for separate profiling run");
+      else if (o.run_budget_ms && std::chrono::duration<double, std::milli>(
+                 std::chrono::steady_clock::now() - run_start).count() >= o.run_budget_ms) {
+        row["reason"] = json_quote("run budget reached between cases; resume required");
+      }
       else if (startup != Status::success) {
         status = startup == Status::unsupported ? Status::unsupported : Status::not_run;
         row["reason"] = json_quote("input/reference setup: " + startup_reason);
@@ -347,7 +275,9 @@ int main(int argc, char** argv) {
         }
         row["workspace_bytes"] = number(workspace);
         row["total_live_device_bytes"] = number(checked_add(workspace, allocation_bytes(x.c.state_size(), sizeof(cuda::std::complex<double>))));
-        preflight_device_bytes(workspace);
+        row["estimated_workspace_bytes"] = number(workspace);
+        if (workspace > o.workspace_limit) throw Unsupported("workspace memory limit exceeded");
+        preflight_device_bytes(checked_add(workspace, o.memory_reserve));
         Result result;
         std::vector<double> output;
         auto execute = [&](auto& reduction) {
@@ -364,6 +294,9 @@ int main(int argc, char** argv) {
         row["reason"] = json_quote(result.reason);
         if (!o.profile_case) row["timing_status"] = json_quote(status_name(status));
         row["raw_elapsed_ms"] = array(result.raw_elapsed_ms);
+        row["completed_repetitions"] = number(result.raw_elapsed_ms.size());
+        if (result.raw_elapsed_ms.size() < x.c.repetitions && result.status == Status::success && !o.profile_case)
+          row["timing_status"] = json_quote("stopped");
         if (result.elapsed_ms) {
           auto samples = result.raw_elapsed_ms;
           std::sort(samples.begin(), samples.end());
@@ -415,6 +348,7 @@ int main(int argc, char** argv) {
       row["status"] = json_quote(status_name(status));
       ++counts[status_name(status)]; failed |= status == Status::failure;
       writer.write(row);
+      if (o.stream_rows) std::cout << "MEASUREMENT_ROW " << json(row) << std::endl;
       std::cout << "case " << id << ' ' << status_name(status) << ' ' << row["reason"] << '\n';
     }
     Fields summary;

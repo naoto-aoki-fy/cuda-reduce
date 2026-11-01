@@ -43,9 +43,7 @@ void preflight_device_bytes(Size bytes);
 Size segmented_workspace_bytes(const Config&);
 DeviceState generate_state(const Config& config);
 std::vector<long double> reference_device_state(const Config& config, const DeviceState& state);
-enum class GlobalLayout { thread_major, bin_major };
 const char* layout_name(GlobalLayout layout);
-enum class AccumulatorStorage { global, shared, registers };
 const char* storage_name(AccumulatorStorage storage);
 struct KernelResources {
   int registers_per_thread = 0;
@@ -54,9 +52,7 @@ struct KernelResources {
   int max_threads = 0, active_blocks_per_sm = 0;
   double theoretical_occupancy = 0;
 };
-enum class BlockPrimitive { custom, cub };
 std::string cub_version_description();
-enum class ReductionMethod { two_kernel, cooperative };
 struct ReductionResources {
   bool cooperative = false;
   Size sm_count = 0, max_resident_blocks = 0;

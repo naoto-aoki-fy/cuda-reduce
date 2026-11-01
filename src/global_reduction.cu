@@ -1,4 +1,5 @@
 #include "measurement/cuda.hpp"
+#include <chrono>
 #include <sstream>
 #include <climits>
 #include <algorithm>
@@ -442,10 +443,12 @@ Result GlobalReduction::run(const DeviceState& state, std::vector<double>& outpu
     Event start, stop;
     output.resize(static_cast<std::size_t>(config_.bins()));
     for (Size i = 0; i < config_.warmups; ++i) execute(state, stream);
+    if (config_.case_budget_ms) cuda_check(cudaStreamSynchronize(stream));
     result.raw_elapsed_ms.reserve(static_cast<std::size_t>(config_.repetitions));
     result.repetition_outputs.resize(static_cast<std::size_t>(config_.repetitions),
       std::vector<double>(static_cast<std::size_t>(config_.bins())));
     double total_ms = 0;
+    const auto measurement_start = std::chrono::steady_clock::now();
     for (Size i = 0; i < config_.repetitions; ++i) {
       cuda_check(cudaEventRecord(start.event, stream));
       execute(state, stream);
@@ -460,8 +463,14 @@ Result GlobalReduction::run(const DeviceState& state, std::vector<double>& outpu
       cuda_check(cudaMemcpyAsync(values.data(), output_.data(),
         allocation_bytes(values.size(), sizeof(double)), cudaMemcpyDeviceToHost, stream));
       cuda_check(cudaStreamSynchronize(stream));
+      if (i + 1 < config_.repetitions && config_.case_budget_ms && std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - measurement_start).count() >= config_.case_budget_ms) {
+        result.reason = "per-case measurement budget reached after completed repetition";
+        break;
+      }
     }
-    result.elapsed_ms = total_ms / double(config_.repetitions);
+    result.repetition_outputs.resize(result.raw_elapsed_ms.size());
+    result.elapsed_ms = total_ms / double(result.raw_elapsed_ms.size());
     cuda_check(cudaMemcpyAsync(output.data(), output_.data(),
       allocation_bytes(output_.size(), sizeof(double)), cudaMemcpyDeviceToHost, stream));
     cuda_check(cudaStreamSynchronize(stream));

@@ -133,6 +133,22 @@ int main(int argc, char**) {
       if (result.status != Status::success) throw std::runtime_error(result.reason);
       compare(output, reference);
     }
+    c.repetitions = 100; c.case_budget_ms = 1; c.warmups = 0;
+    GlobalReduction bounded(c, GlobalLayout::thread_major);
+    std::vector<double> bounded_output;
+    auto bounded_result = bounded.run(state, bounded_output);
+    if (bounded_result.status != Status::success || bounded_result.raw_elapsed_ms.empty() ||
+        bounded_result.repetition_outputs.size() != bounded_result.raw_elapsed_ms.size() ||
+        bounded_result.raw_elapsed_ms.size() > c.repetitions)
+      throw std::runtime_error("invalid budgeted custom timing result");
+    for (const auto& values : bounded_result.repetition_outputs) compare(values, reference);
+    SegmentedReduction bounded_segmented(c);
+    auto segmented_result = bounded_segmented.run(state, bounded_output);
+    if (segmented_result.status != Status::success || segmented_result.raw_elapsed_ms.empty() ||
+        segmented_result.repetition_outputs.size() != segmented_result.raw_elapsed_ms.size() ||
+        segmented_result.raw_elapsed_ms.size() > c.repetitions)
+      throw std::runtime_error("invalid budgeted segmented timing result");
+    for (const auto& values : segmented_result.repetition_outputs) compare(values, reference);
     std::cout << cases << " cases passed for global and supported shared layouts, dirty workspace reuse and changed input; timing passed\n";
   } catch (const Unsupported& e) {
     std::cerr << "unsupported: " << e.what() << '\n'; return 77;

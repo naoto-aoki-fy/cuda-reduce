@@ -13,6 +13,10 @@ Size checked_add(Size a, Size b);
 Size checked_mul(Size a, Size b);
 Size power_of_two(unsigned exponent);
 std::size_t allocation_bytes(Size elements, Size element_bytes);
+enum class GlobalLayout { thread_major, bin_major };
+enum class AccumulatorStorage { global, shared, registers };
+enum class BlockPrimitive { custom, cub };
+enum class ReductionMethod { two_kernel, cooperative };
 struct Config {
   unsigned qubits = 10;
   std::vector<unsigned> positions{0};
@@ -22,6 +26,7 @@ struct Config {
   Size warmups = 3;
   Size seed = default_seed;
   Size chunk_elements = 65536;
+  Size case_budget_ms = 0; // zero disables; stop only after a completed repetition
   void validate() const;
   Size state_size() const;
   Size bins() const;

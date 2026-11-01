@@ -204,11 +204,259 @@ selected architecture; numerical correctness alone cannot prove absence of
 atomics. See cooperative-sync-audit.md and cub-baselines.md.
 Do not interpret the presence of all requested rows as support for every row.
 
-For this Step 6 implementation, tests and sanitizers were **skipped at the
-user's explicit request**, overriding the task's request to run the suite.
-`make host` succeeded. `make cuda` failed before compilation because nvcc is
-absent. GPU tools and Nsight Compute are also unavailable here. Consequently,
-CUDA compilation, all GPU correctness checks, full-size validation, actual
-resource metrics, profiling and all benchmark times remain unverified. No
-performance numbers or successful device validation are claimed. The commands
-above are the exact remaining execution path on a suitably provisioned GPU.
+The expanded infrastructure is host-tested (including preset compatibility,
+configuration validation, simulated interruption and resume). This implementation
+environment has no nvcc or GPU tools. CUDA compilation, device correctness,
+sanitizers, actual resource metrics, profiling and benchmark timings remain
+unverified. No performance data has been collected here.
+
+## Opt-in version 1 benchmark plans
+
+The legacy commands above keep their defaults and ordering. Only
+`--matrix-config` selects the new Python standard-library planner and execution
+wrapper. Basic planning and journal recovery need Python 3 on a POSIX system,
+and do not build CUDA or query a device:
+
+```sh
+make benchmark-full BENCHMARK_RESULTS=build/pilot \
+  BENCHMARK_ARGS='--matrix-config configs/benchmark-full-pilot.json --dry-run'
+make benchmark-full BENCHMARK_RESULTS=build/pilot \
+  BENCHMARK_ARGS='--matrix-config configs/benchmark-full-pilot.json --validation skip --resume'
+# Reconstruct recorded rows even without a binary or GPU:
+make benchmark-full BENCHMARK_RESULTS=build/pilot BENCHMARK_ARGS='--recover'
+```
+
+A dry run writes PREFIX.plan.json with every ordered workload, full candidate
+configuration, workload_id, candidate_id, case_key, counts, input bytes, workspace
+lower bounds, predictable policy rejections and resource estimates. No state is
+allocated and no kernels are launched. SM-dependent workspace, actual shared
+scratch, occupancy and segmented temporary storage require runtime checks;
+unknown values are null. Inspect the plan file to see individual configurations.
+`--results` in the Python command is equivalent to BENCHMARK_RESULTS in Make.
+
+Example schema (all field names are strict; unknown fields are errors):
+
+```json
+{
+  "version": 1,
+  "q": [12, 16, 20],
+  "k": [1, 3, 6],
+  "positions": {
+    "patterns": ["low", "middle", "high", "random"],
+    "random_count": 4,
+    "seed": 20261031,
+    "reverse": true
+  },
+  "candidates": {
+    "methods": ["custom", "cub", "segmented"],
+    "storage": ["shared", "global"],
+    "layouts": ["thread_major", "bin_major"],
+    "block_sizes": [128, 256, 512],
+    "sm_multipliers": [1, 2, 4, 8, 16],
+    "strategies": ["two_kernel"]
+  },
+  "measurement": {
+    "seed": 20261031,
+    "scheduling_seed": 20261101,
+    "validation": "full",
+    "warmups": 3,
+    "repetitions": 5,
+    "chunk_elements": 65536,
+    "memory_reserve_bytes": 536870912,
+    "workspace_limit_bytes": 8589934592,
+    "case_budget_ms": 0,
+    "run_budget_seconds": 0
+  }
+}
+```
+
+`q` accepts a nonempty list in [1,59], bounded by uint64 input-byte arithmetic;
+large requests are subject to runtime feasibility. `k` accepts a nonempty list
+in [1,min(16,q)] or the string `"all"` for all valid widths independently per q.
+Explicit invalid q/k combinations fail matrix generation; no input is downsized.
+Repeated workload specifications are deduplicated by exact ordered positions,
+q and input seed. This opt-in deduplication does not affect legacy presets.
+
+Patterns include low/middle/high, `all_contiguous` (each start from 0 to q-k),
+`alternating` (even bits, then odd bits if needed), `mixed` (ceil(k/2) low bits
+and the remaining highest bits), `distant` (k-1 low bits and the highest bit),
+`random`, and `explicit`. Explicit arrays use, for example,
+`"patterns":["explicit"], "explicit":[[7,1,4],[4,1,7]]`; arrays apply to matching
+k values and must be valid for every selected q. A requested q/k pair with no
+matching position arrays is rejected. Random arrays are fixed-seed
+ordered samples with noncontiguous sets whenever 1<k<q. For k=1 or k=q a
+noncontiguous set is impossible. `reverse:true` adds reversed arrays. Arrays
+are never sorted; permutations with different output-bin semantics retain
+different identities. Duplicate arrays retain the first pattern label. Category
+labels do not affect identity.
+
+Candidate filters expand only the selected dimensions. `cub` means CUB
+BlockReduce; `segmented` means CUB DeviceSegmentedReduce and generates one
+candidate per workload regardless of other dimensions. Registers have no layout.
+Optional `registers` storage and `cooperative` strategy remain explicitly
+unsupported under the current audits. No policy gate is relaxed.
+
+For shortlists use `candidates.include` instead of Cartesian filters:
+
+```json
+{"include": [
+  {"method":"custom", "storage":"global", "layout":"thread_major",
+   "block_size":256, "sm_multiplier":4, "strategy":"two_kernel"},
+  {"method":"segmented"}
+]}
+```
+
+There are no built-in winners. The shortlist in the example Stage B/C/D files
+is illustrative; edit it based on separately validated Stage A results. Included
+candidates specify all applicable tuning fields. Measurement defaults are seed
+20261031, scheduling seed 20261101, 1 repetition, 3 warmups, 65536 host chunk
+elements, full validation, a 512 MiB memory reserve, unlimited workspace and no
+budgets. Each measurement key can also be overridden on the command line using
+hyphens, for example `--repetitions 9 --case-budget-ms 1000`.
+
+## Independent benchmark stages
+
+| Stage | Configuration | Coverage |
+| --- | --- | --- |
+| A | configs/benchmark-full-pilot.json | q=20,28; k=1,3,5,6,8,12,14,16; low/middle/high; 48 workloads, 121 candidates each (5808 cases) |
+| B | configs/benchmark-full-coverage.json | q=12,16,20,24,26,28; all valid widths; low/middle/high, deduplicated; editable shortlist |
+| C | configs/benchmark-full-positions.json | q=20,28; k=3,6,12; every contiguous start, structured/random patterns and reversals |
+| D | configs/benchmark-full-large.json | q=29..33 with resource checks; editable shortlist |
+
+Select a file independently with `--matrix-config`. Legacy `benchmark-full`
+does not execute these stages automatically. Stage A files deliberately request
+potentially infeasible configurations so the dataset retains rejection rows.
+
+## Expanded execution, resources and budgets
+
+Each q has one child process with one immutable `(q,seed)` input reused by all
+pending candidates and one traversal for all required CPU references. Candidates
+are shuffled within q using scheduling_seed, while q groups follow the plan's
+order. The journal records actual completion order. Separate seeds control
+input generation, position generation and scheduling. Resume initializes the
+same state again for each q with remaining work.
+
+The planner first queries actual GPU properties, free memory and build metadata
+without allocating a state. Each candidate is checked against input generation
+scratch (up to 16 MiB), workspace, available memory, and the configured reserve.
+No GPU-name resource lookup is used. Predictable rejections are retained without
+allocating the state. The driver repeats memory checks immediately before state
+allocation and before each workspace allocation. It queries kernel resources
+and exact CUB segmented temporary-storage bytes. The workspace limit covers
+positions, accumulators, partials, output and library temporary buffers; it
+excludes the immutable input. The reserve is additional free headroom. The
+estimated workspace formulas are the same as the legacy formulas above.
+
+Shared-memory estimates in the planner are lower bounds; runtime kernel queries
+also account for scratch, registers, occupancy and device launch limits.
+`workspace_bytes` is the queried allocation requirement, not an allocator's
+physical-granularity measurement. CUDA context, events, cuRAND internals and
+allocator overhead are not exactly predicted; memory availability can change.
+Unexpected CUDA allocation failures retain their diagnostics and are labeled
+`failure_category=unexpected_allocation_failure`, separately from predictable
+`resource_or_policy_rejection`. Legacy allocation status remains unsupported.
+Unexpected execution/validation failures remain failures with nonzero exit.
+
+`case_budget_ms` limits the measured repetition phase, including completed
+output downloads; warmups and setup are excluded. It stops after a completed
+repetition and retains actual samples and validated outputs. At least one
+repetition completes. `timing_status=stopped` distinguishes a partial repetition
+set from success; the reason explains the budget. `run_budget_seconds` is a soft
+wall-clock budget checked between q groups and cases, including driver setup.
+No in-flight CUDA kernel, operation or reference traversal is interrupted, so
+budgets may be exceeded by one operation/setup phase. Unattempted cases remain
+not_run. Resume retries not_run/missing/stopped cases; it does not combine partial
+samples with a new attempt. A stopped case restarts its requested repetitions,
+so increase/remove its budget with a new prefix for a longer experiment.
+
+## Durable journal and expanded result schema
+
+PREFIX.journal.jsonl is append-only: one header followed by one complete result
+per finished case/attempt. Each record is flushed and fsynced. A prefix has an
+exclusive POSIX lock, preventing concurrent writers. Existing journals require
+`--resume` or a new prefix; `--resume` also starts a new journal if none exists.
+A torn unterminated final line is discarded on resume; malformed complete lines
+are errors. Latest attempts replace earlier attempts in exports, preserving all
+raw attempts in the journal. Completed success/unsupported/failure cases are
+skipped. Missing, not_run and budget-stopped cases are eligible for rerun.
+
+Resume compares canonical configuration and measurement settings, GPU UUID/PCI
+identifier and architecture, driver/runtime/library versions, compiler/build
+metadata, binary SHA-256 and planner SHA-256. Changes reject resume. Initially
+free memory may vary and is excluded from compatibility checks. Original run
+metadata remains in the header. Changing seeds, validation, repetitions,
+budgets, config or source/build requires a new prefix. Separate GPU results must
+use separate prefixes. `--recover` only exports existing journal records; it
+never queries CUDA or invents missing cases. It is useful after a crash. Final
+normal exports also include explicit pending rows for all planned cases.
+
+Final JSON retains the `metadata`, `results`, `summary` structure and CSV retains
+JSON-token cells and `run_` metadata fields. Both exports use atomic replacement;
+the journal is authoritative if interruption occurs between the two replacements.
+Expanded exports retain legacy row fields and add:
+
+- SHA-256 `workload_id` (q, ordered positions, input seed), `candidate_id`
+  (applicable algorithm/tuning fields), `case_key` (the pair), and benchmark_run_id.
+  `case_id` remains a zero-based plan index, independent of execution order.
+- q, N, bins, exact positions, position_pattern, input_bytes, completed_repetitions,
+  timing_mode (`single_invocation`), workspace estimates/lower bound, feasibility
+  and resource_rejection_reason. Unsupported or unavailable metrics remain null.
+- GPU UUID/PCI identity, L2 and shared-memory limits, initial free and total
+  memory, runtime/driver/library versions, compiler flags/build/source revision.
+  Kernel metadata and all original timing/numerical fields remain available.
+- N_per_bin, total_threads, v2_total_threads, input_over_L2,
+  accumulator_over_L2, and bins_over_gcd_bins_threads (only for the exact ascending
+  low-contiguous mapping). Ratios are null when their inputs are unavailable.
+
+Sample standard deviation is null for fewer than two samples. Successful timing
+with `validation_status=skipped` is explicitly unvalidated. Resource feasibility,
+numerical correctness, timing completion and atomic-policy audit are separate
+properties. Profiler metrics remain separate; no counters or confidence intervals
+are fabricated.
+
+## Commands on each GPU
+
+Run each command independently on its named machine, with a toolkit supporting
+that installed GPU. `-arch=native` compiles for the locally visible GPU; actual
+binary architecture is retained in result rows. Use CUDA_VISIBLE_DEVICES to
+select one device if the machine has several. No multi-device reduction is
+performed; this is the same plan executed separately on five GPU types.
+
+```sh
+# NVIDIA A100 machine
+CUDA_VISIBLE_DEVICES=0 make benchmark-full NVCCFLAGS='-O2 -arch=native -lineinfo' BENCHMARK_RESULTS=build/a100-pilot BENCHMARK_ARGS='--matrix-config configs/benchmark-full-pilot.json --validation skip --resume'
+# NVIDIA GH200 machine
+CUDA_VISIBLE_DEVICES=0 make benchmark-full NVCCFLAGS='-O2 -arch=native -lineinfo' BENCHMARK_RESULTS=build/gh200-pilot BENCHMARK_ARGS='--matrix-config configs/benchmark-full-pilot.json --validation skip --resume'
+# NVIDIA GB200 machine
+CUDA_VISIBLE_DEVICES=0 make benchmark-full NVCCFLAGS='-O2 -arch=native -lineinfo' BENCHMARK_RESULTS=build/gb200-pilot BENCHMARK_ARGS='--matrix-config configs/benchmark-full-pilot.json --validation skip --resume'
+# NVIDIA RTX PRO 6000 Blackwell machine
+CUDA_VISIBLE_DEVICES=0 make benchmark-full NVCCFLAGS='-O2 -arch=native -lineinfo' BENCHMARK_RESULTS=build/rtx-pro-6000-pilot BENCHMARK_ARGS='--matrix-config configs/benchmark-full-pilot.json --validation skip --resume'
+# NVIDIA RTX 3060 machine
+CUDA_VISIBLE_DEVICES=0 make benchmark-full NVCCFLAGS='-O2 -arch=native -lineinfo' BENCHMARK_RESULTS=build/rtx3060-pilot BENCHMARK_ARGS='--matrix-config configs/benchmark-full-pilot.json --validation skip --resume'
+```
+
+For each machine, first run `make test-host`, `make test-cuda` and `make sanitize`
+with matching NVCCFLAGS, then a fully validated small/medium plan or smoke run:
+
+```sh
+make benchmark-smoke NVCCFLAGS='-O2 -arch=native -lineinfo' BENCHMARK_ARGS='--qubits 12 --validation full --repetitions 3'
+# Edit a copy of Stage B to representative medium q/k/candidates, then run:
+make benchmark-full NVCCFLAGS='-O2 -arch=native -lineinfo' BENCHMARK_RESULTS=build/validated-medium BENCHMARK_ARGS='--matrix-config configs/benchmark-full-coverage.json --validation full --resume'
+```
+
+Full CPU-reference validation remains available at every size. It can take
+considerable time, so keep validation experiments separate from large skip-mode
+runs. Inspect statuses and numerical errors rather than relying solely on exit
+zero, especially for resource-rejected plans.
+
+## Limitations and deferred features
+
+No selector, model or kernel optimization is included. Repeated-invocation timed
+batches are deferred; timings remain one complete invocation per event interval.
+Host-only dry runs do not predict exact CUB storage or device kernel residency.
+The wrapper is POSIX-only (advisory locking), uses one GPU per process and has
+soft budgets. CPU reference memory/time and repetition-output host memory are
+not governed by the device-memory limit. Legacy direct-binary results retain
+their original streaming behavior; durable resume is opt-in through the planner.
+All runtime GPU results and cross-architecture comparisons still require the
+commands above to be executed on the actual devices.
