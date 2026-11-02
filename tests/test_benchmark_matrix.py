@@ -87,6 +87,59 @@ class MatrixTests(unittest.TestCase):
         reg['candidate']['storage']='registers'
         self.assertIn('audit', bm.estimate(reg,d,settings)['resource_rejection_reason'])
 
+    def test_all_block_sizes(self):
+        blocks = [32, 64, 128, 256, 512, 1024]
+        candidates = dict(methods=['custom', 'cub', 'segmented'], block_sizes=blocks,
+                          storage=['global', 'shared'], layouts=['thread_major', 'bin_major'],
+                          sm_multipliers=[2], strategies=['two_kernel'])
+        config = dict(self.config(), q=[12], k=[1], positions=dict(patterns=['low']),
+                      candidates=candidates)
+        settings, workloads, cases = bm.plan(config)
+        self.assertEqual(len(workloads), 1)
+        self.assertEqual(len(cases), 49)
+        self.assertEqual(sum(c['candidate']['method'] == 'segmented' for c in cases), 1)
+        self.assertEqual(len({c['case_key'] for c in cases}), 49)
+        # Removing block size leaves exactly the same tuning combinations.
+        groups = []
+        for block in blocks:
+            selected = [c['candidate'] for c in cases if c['candidate'].get('block_size') == block]
+            self.assertEqual(len(selected), 8)
+            groups.append({bm.identity({k: v for k, v in c.items() if k != 'block_size'}) for c in selected})
+        self.assertTrue(all(g == groups[0] for g in groups))
+        included = [c['candidate'] for c in cases]
+        self.assertEqual(bm.plan(dict(config, candidates=dict(include=included)))[2], cases)
+        for block in [16, 96, 2048, 32.0, True]:
+            with self.subTest(block=block), self.assertRaises(ValueError):
+                bm.plan(dict(config, candidates=dict(candidates, block_sizes=[block])))
+            bad = dict(included[0], block_size=block)
+            with self.subTest(include=block), self.assertRaises(ValueError):
+                bm.plan(dict(config, candidates=dict(include=[bad])))
+        # Shared memory rejection retains the requested block size.
+        shared = next(c for c in cases if c['candidate'].get('block_size') == 1024
+                      and c['candidate'].get('storage') == 'shared')
+        device = dict(SM_count=1, shared_memory_optin_per_block=16384,
+                      initial_free_device_bytes=1024**3)
+        large = copy.deepcopy(shared)
+        large['workload']['bins'] = 4
+        self.assertIn('shared', bm.estimate(large, device, settings)['resource_rejection_reason'])
+        self.assertEqual(large['candidate']['block_size'], 1024)
+        # Synthetic timings check serialization only, without claiming GPU evidence.
+        rows = {}
+        for index, case in enumerate(cases):
+            row = bm.base_row(case, settings, 'test', index)
+            row.update(status='success', mean_ms=1.25, raw_elapsed_ms=[1.25])
+            rows[row['case_key']] = row
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp)/'blocks'
+            bm.export_results(prefix, dict(metadata={}), rows)
+            saved = json.loads(prefix.with_suffix('.json').read_text())['results']
+            with prefix.with_suffix('.csv').open() as f:
+                csv_rows = [{k: json.loads(v) for k, v in row.items()} for row in csv.DictReader(f)]
+            for exported in [saved, csv_rows]:
+                self.assertEqual({r['block_size'] for r in exported}, {None, *blocks})
+                self.assertTrue(all(r['mean_ms'] == 1.25 and r['raw_elapsed_ms'] == [1.25]
+                                    for r in exported))
+
     def test_truncated_journal_and_export(self):
         with tempfile.TemporaryDirectory() as tmp:
             prefix=Path(tmp)/'r'

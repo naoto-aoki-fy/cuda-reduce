@@ -34,8 +34,9 @@ void Config::validate() const {
     if (seen & bit) throw std::invalid_argument("duplicate position");
     seen |= bit;
   }
-  if (block_size != 128 && block_size != 256 && block_size != 512)
-    throw std::invalid_argument("supported block sizes: 128,256,512");
+  if (block_size != 32 && block_size != 64 && block_size != 128 &&
+      block_size != 256 && block_size != 512 && block_size != 1024)
+    throw std::invalid_argument("supported block sizes: 32,64,128,256,512,1024");
   if (!sm_multiplier || !repetitions || !chunk_elements)
     throw std::invalid_argument("multiplier, repetitions and chunk size must be positive");
   allocation_bytes(state_size(), 2 * sizeof(double));

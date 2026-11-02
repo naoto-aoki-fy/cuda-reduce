@@ -73,8 +73,7 @@ int main(int argc, char**) {
   try {
     const bool quick = argc > 1;
     unsigned cases = 0;
-    for (unsigned block : {128u, 256u, 512u}) {
-      if (quick && block != 128) continue;
+    for (unsigned block : {32u, 64u, 128u, 256u, 512u, 1024u}) {
       for (auto fixture : deterministic_fixtures()) {
         fixture.config.block_size = block;
         fixture.config.sm_multiplier = 1;

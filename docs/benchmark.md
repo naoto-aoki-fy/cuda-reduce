@@ -45,14 +45,14 @@ smoke workload, never a full-size measurement.
 ## Full benchmark
 
 ```sh
-make benchmark-full BENCHMARK_ARGS='--block-sizes 128,256,512 --repetitions 5 --warmups 3 --seed 20261031 --chunk-elements 65536'
+make benchmark-full BENCHMARK_ARGS='--block-sizes 32,64,128,256,512,1024 --repetitions 5 --warmups 3 --seed 20261031 --chunk-elements 65536'
 ```
 
 The full preset fixes q=31, N=2147483648, and the state alone consumes
 34359738368 bytes (32 GiB). It rejects `--qubits`; it never substitutes a smaller
 state. Both matrix presets own `--positions` and `--sm-multiplier` and reject
 those overrides. `--block-sizes` accepts a distinct comma-separated selection
-from 128,256,512; it defaults to `--block-size` (256). Measured repetitions
+from 32,64,128,256,512,1024; it defaults to `--block-size` (256). Measured repetitions
 default to 1 and warmups to 3.
 
 Each of 48 measurement configurations (k=1..16 times three position bands) has,
@@ -60,7 +60,8 @@ for each block size and multiplier, 20 rows: custom/CUB BlockReduce times two
 strategies times five storage/layout choices (registers with layout n/a, shared
 with two layouts, global with two layouts). Add one DeviceSegmentedReduce row
 per measurement configuration, independent of custom tuning. The default full
-matrix therefore contains **4848 rows**; three block sizes produce **14448**.
+matrix therefore contains **4848 rows**; three block sizes produce **14448**,
+and all six produce **28848**. The default block size remains 256.
 Here k counts measured qubits, while the state size stays fixed at q=31.
 The smoke preset retains its k=1..min(8,q) sweep. Larger k can exceed shared
 memory or global workspace limits; these requests remain explicit unsupported
@@ -68,6 +69,21 @@ rows, as do register requests beyond the existing eight-bin capacity (k>3).
 Even coincident position bands on a small smoke input retain separate labels.
 Unsupported requests remain rows with explicit diagnostics. Segmented custom
 fields and register layout are JSON null (not applicable).
+
+For block-size comparisons, group CSV/JSON rows by workload (q and ordered
+positions), method, storage, layout, strategy and SM multiplier, then compare
+`mean_ms`, `median_ms` or `raw_elapsed_ms` across `block_size`. Input generation,
+warmups and repetitions are shared settings for the sweep. DeviceSegmentedReduce
+has a null block size and runs once per workload. Device/kernel thread limits,
+shared memory and occupancy checks report unsupported rows with reasons; they
+never substitute a different block size. The JSON planner accepts the same six
+sizes in both `candidates.block_sizes` and explicit `include` entries; its omitted
+`block_sizes` default remains `[128, 256, 512]`.
+
+`make test-host` checks CLI and JSON planning for all six sizes. On a CUDA host,
+run `make test-cuda` for numerical comparisons, dirty workspace reuse and idle
+thread/grid-stride edge cases, including 32 and 1024 threads. `make sanitize`
+also includes all six sizes in the custom-kernel quick checks.
 
 The input is generated exactly once with the specified seed, Philox generator,
 default cuRAND ordering, offset zero and fixed generation chunks. Every method
@@ -251,7 +267,7 @@ Example schema (all field names are strict; unknown fields are errors):
     "methods": ["custom", "cub", "segmented"],
     "storage": ["shared", "global"],
     "layouts": ["thread_major", "bin_major"],
-    "block_sizes": [128, 256, 512],
+    "block_sizes": [32, 64, 128, 256, 512, 1024],
     "sm_multipliers": [1, 2, 4, 8, 16],
     "strategies": ["two_kernel"]
   },

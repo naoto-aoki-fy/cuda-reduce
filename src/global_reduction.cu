@@ -8,7 +8,8 @@
 
 namespace measurement {
 namespace {
-// Only 128/256/512 threads are accepted: every shuffle has a full warp.
+// Supported blocks contain 1..32 complete warps, so every shuffle has a full warp.
+constexpr unsigned max_block_warps = 1024 / 32;
 __device__ double warp_sum(double value) {
   for (unsigned delta = 16; delta; delta /= 2)
     value += __shfl_down_sync(0xffffffffu, value, delta);
@@ -136,21 +137,21 @@ __device__ __forceinline__ void second_stage_body(const double* partials, double
 __global__ void first_stage(const cuda::std::complex<double>* state, Size count,
                             const unsigned* positions, unsigned k, Size bins,
                             double* sums, double* partials, bool bin_major) {
-  __shared__ double scratch[16];
+  __shared__ double scratch[max_block_warps];
   first_stage_body(state, count, positions, k, bins, sums, partials, bin_major, scratch);
 }
 __global__ void shared_first_stage(const cuda::std::complex<double>* state, Size count,
     const unsigned* positions, unsigned k, Size bins, double* partials, bool bin_major) {
-  __shared__ double scratch[16];
+  __shared__ double scratch[max_block_warps];
   shared_first_stage_body(state, count, positions, k, bins, partials, bin_major, scratch);
 }
 __global__ void register_first_stage(const cuda::std::complex<double>* state, Size count,
     const unsigned* positions, unsigned k, Size bins, double* partials) {
-  __shared__ double scratch[16];
+  __shared__ double scratch[max_block_warps];
   register_first_stage_body(state, count, positions, k, bins, partials, scratch);
 }
 __global__ void second_stage(const double* partials, double* output, Size bins) {
-  __shared__ double scratch[16];
+  __shared__ double scratch[max_block_warps];
   second_stage_body(partials, output, bins, scratch);
 }
 // One launch, one mandatory grid collective, then unique block ownership per bin.
@@ -158,7 +159,7 @@ template<AccumulatorStorage Storage>
 __global__ void cooperative_stage(const cuda::std::complex<double>* state, Size count,
     const unsigned* positions, unsigned k, Size bins, double* sums,
     double* partials, double* output, bool bin_major) {
-  __shared__ double scratch[16];
+  __shared__ double scratch[max_block_warps];
   if constexpr (Storage == AccumulatorStorage::global)
     first_stage_body(state, count, positions, k, bins, sums, partials, bin_major, scratch);
   else if constexpr (Storage == AccumulatorStorage::shared)
@@ -212,11 +213,14 @@ const void* cub_kernel(AccumulatorStorage storage, ReductionMethod method, bool 
 }
 const void* cub_kernel(const Config& c, AccumulatorStorage storage, ReductionMethod method, bool second = false) {
   switch (c.block_size) {
+    case 32: return cub_kernel<32>(storage, method, second);
+    case 64: return cub_kernel<64>(storage, method, second);
     case 128: return cub_kernel<128>(storage, method, second);
     case 256: return cub_kernel<256>(storage, method, second);
     case 512: return cub_kernel<512>(storage, method, second);
+    case 1024: return cub_kernel<1024>(storage, method, second);
   }
-  throw std::invalid_argument("CUB BlockReduce supports S=128,256,512");
+  throw std::invalid_argument("CUB BlockReduce supports S=32,64,128,256,512,1024");
 }
 Size checked_blocks(const Config& c, AccumulatorStorage storage, ReductionMethod method, BlockPrimitive primitive) {
   c.validate();

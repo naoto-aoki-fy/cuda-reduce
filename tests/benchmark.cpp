@@ -15,6 +15,22 @@ int main() {
   assert(m.references.back().positions == contiguous_positions(31,16,"high"));
   const char* blocks[] = {"test", "--preset", "full", "--block-sizes", "128,256,512"};
   assert(matrix(options(5, const_cast<char**>(blocks))).cases.size() == 14448);
+  const char* all_blocks[] = {"test", "--preset", "full", "--block-sizes", "32,64,128,256,512,1024"};
+  auto all = matrix(options(5, const_cast<char**>(all_blocks)));
+  assert(all.cases.size() == 28848 && all.references.size() == 48);
+  std::size_t baseline_count = 0;
+  for (const auto& x : all.cases) baseline_count += x.segmented;
+  assert(baseline_count == 48);
+  // Every tuning combination is identical across block sizes.
+  for (unsigned block : {32u, 64u, 128u, 256u, 512u, 1024u}) {
+    std::size_t count = 0;
+    for (const auto& x : all.cases) if (!x.segmented && x.c.block_size == block) {
+      assert(x.c.qubits == 31 && x.c.seed == o.config.seed);
+      assert(x.c.repetitions == o.config.repetitions && x.c.warmups == o.config.warmups);
+      ++count;
+    }
+    assert(count == 4800);
+  }
   const char* smoke[] = {"test", "--preset", "smoke", "--qubits", "3"};
   assert(matrix(options(5, const_cast<char**>(smoke))).references.size() == 9);
   const char* single[] = {"test", "--positions", "7,1"};

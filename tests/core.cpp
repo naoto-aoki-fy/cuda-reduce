@@ -19,11 +19,11 @@ int main() {
     rejects<std::overflow_error>([] { workspace_elements(Size{1} << 60, 512, 256); });
     rejects<std::overflow_error>([] { allocation_bytes(Size{1} << 61, 8); });
     rejects<std::overflow_error>([] { checked_add(std::numeric_limits<Size>::max(), 1); });
-    for (unsigned block : {128u, 256u, 512u}) {
+    for (unsigned block : {32u, 64u, 128u, 256u, 512u, 1024u}) {
       Config c; c.block_size = block;
       c.validate(); require(launch_blocks(c, 7) == 56);
     }
-    for (unsigned block : {0u, 32u, 129u, 1024u}) {
+    for (unsigned block : {0u, 16u, 33u, 96u, 129u, 2048u}) {
       Config c; c.block_size = block;
       rejects<std::invalid_argument>([&] { c.validate(); });
     }

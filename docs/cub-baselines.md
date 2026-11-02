@@ -39,7 +39,7 @@ the installed DeviceSegmentedReduce policy is left to CUB.
 Select `GlobalReduction(config, layout, storage, method, BlockPrimitive::cub)`.
 The default primitive remains custom. Accumulation/traversal bodies are shared
 source with a compile-time reduction policy: S=0 instantiates only the custom
-shuffle/barrier primitive; S=128/256/512 instantiates only
+shuffle/barrier primitive; S=32/64/128/256/512/1024 instantiates only
 `cub::BlockReduce<double,S,cub::BLOCK_REDUCE_WARP_REDUCTIONS>::Sum`.
 No measurement count or bin count is a template argument.
 

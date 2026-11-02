@@ -80,7 +80,7 @@ can disagree with the supplied list. Defaults:
 | --- | --- | --- |
 | `--qubits` | 10 | 1 through 63, subject to checked allocation size |
 | `--positions` | `0` | 1 through min(16,q) distinct positions in [0,q) |
-| `--block-size` | 256 | 128, 256, 512 |
+| `--block-size` | 256 | 32, 64, 128, 256, 512, 1024 |
 | `--sm-multiplier` | 8 | Positive; benchmark sweep remains {1,2,4,8,16} |
 | `--repetitions` | 1 | Positive |
 | `--warmups` | 3 | Zero or greater |
@@ -184,7 +184,7 @@ follow the same rule. No profiling values are collected by the Step 1 driver.
 ## Step 2: global-memory independent reduction
 
 `GlobalReduction` implements both global accumulator layouts with two custom
-kernels, each launched with exactly G blocks and the configured 128, 256 or 512
+kernels, each launched with exactly G blocks and the configured 32, 64, 128, 256, 512 or 1024
 threads. Measurement count and positions remain runtime parameters. Thread g
 initializes its B accumulators and traverses J=g+T*j once. Each bin is then
 reduced within the block by full-mask warp shuffles and a shared-memory reduction
@@ -309,7 +309,7 @@ benchmark matrix remain deferred.
 
 `BlockPrimitive::custom` remains the default and instantiates only the independent
 custom reduction primitive. `BlockPrimitive::cub` instantiates matched CUB kernels
-at S=128/256/512, preserving runtime measurement count, positions, accumulator
+at S=32/64/128/256/512/1024, preserving runtime measurement count, positions, accumulator
 storage/layout and two-kernel/cooperative structure. Resource checks inspect the
 actual selected CUB kernels. Register residency and cooperative synchronization
 qualification remain independent gates.

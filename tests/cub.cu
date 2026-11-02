@@ -48,7 +48,7 @@ void check(Config c, bool segmented_only = false) {
   SegmentedReduction segmented(c);
   reuse(segmented, state, values, expected, stream.value);
   if (segmented_only) return;
-  for (unsigned block : {128u, 256u, 512u}) {
+  for (unsigned block : {32u, 64u, 128u, 256u, 512u, 1024u}) {
     c.block_size = block;
     for (auto storage : {AccumulatorStorage::global, AccumulatorStorage::shared})
     for (auto layout : {GlobalLayout::thread_major, GlobalLayout::bin_major}) {
@@ -82,6 +82,18 @@ int main() {
         if (reversed) std::reverse(p.begin(), p.end());
         Config c; c.qubits = q; c.positions = p; check(c);
       }
+    }
+    // Activate the last warp of 1024-thread blocks and exercise grid-stride
+    // iterations, in addition to the tiny inputs with mostly idle threads.
+    int device; cuda_check(cudaGetDevice(&device));
+    cudaDeviceProp props{}; cuda_check(cudaGetDeviceProperties(&props, device));
+    const Size threads = checked_mul(Size{props.multiProcessorCount}, Size{1024});
+    unsigned q = 8;
+    while (power_of_two(q) <= threads) ++q;
+    for (unsigned k : {1u, 3u}) {
+      Config c; c.qubits = q; c.positions = contiguous_positions(q, k, "high");
+      std::reverse(c.positions.begin(), c.positions.end());
+      check(c);
     }
     // Exercise the expanded gather descriptor on bounded input, avoiding the
     // large per-thread global workspace required by these measurement counts.

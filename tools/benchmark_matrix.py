@@ -106,6 +106,7 @@ METHODS = ['custom', 'cub', 'segmented']
 STORAGE = ['shared', 'global', 'registers']
 LAYOUTS = ['thread_major', 'bin_major']
 STRATEGIES = ['two_kernel', 'cooperative']
+BLOCK_SIZES = [32, 64, 128, 256, 512, 1024]
 
 
 def candidates(spec):
@@ -128,8 +129,8 @@ def candidates(spec):
                     raise ValueError('included candidate missing tuning fields')
                 choices([entry['storage']], STORAGE, 'storage')
                 choices([entry['strategy']], STRATEGIES, 'strategy')
-                integer(entry['block_size'], 'block_size', 128, 512)
-                choices([entry['block_size']], [128, 256, 512], 'block_size')
+                integer(entry['block_size'], 'block_size', 32, 1024)
+                choices([entry['block_size']], BLOCK_SIZES, 'block_size')
                 integer(entry['sm_multiplier'], 'sm_multiplier', 1, (1 << 31)-1)
                 if entry['storage'] == 'registers':
                     if 'layout' in entry:
@@ -141,9 +142,9 @@ def candidates(spec):
         methods = choices(spec.get('methods', METHODS), METHODS, 'methods')
         storage = choices(spec.get('storage', ['shared', 'global']), STORAGE, 'storage')
         layouts = choices(spec.get('layouts', LAYOUTS), LAYOUTS, 'layouts')
-        blocks = choices(spec.get('block_sizes', [128, 256, 512]), [128, 256, 512], 'block_sizes')
+        blocks = choices(spec.get('block_sizes', [128, 256, 512]), BLOCK_SIZES, 'block_sizes')
         for block in blocks:
-            integer(block, 'block_size', 128, 512)
+            integer(block, 'block_size', 32, 1024)
         multipliers = spec.get('sm_multipliers', [1, 2, 4, 8, 16])
         if not isinstance(multipliers, list) or not multipliers:
             raise ValueError('sm_multipliers must be a nonempty list')

@@ -38,7 +38,7 @@ upload, input generation, CPU reference, and result copying are outside timing. 
 unavailable. Runtime errors and numerical mismatches are failures; device/kernel
 resource limits and CUDA allocation exhaustion are explicit unsupported results.
 
-Supported block sizes are **128, 256, 512**, validated explicitly. Both kernels
+Supported block sizes are **32, 64, 128, 256, 512, 1024**, validated explicitly. Both kernels
 launch exactly `G = SM_count * sm_multiplier` blocks on the same stream. Each
 thread reads its grid-stride input elements once. Bin extraction uses the runtime
 ordered positions. Reductions use full-warp shuffles followed by shared scratch,
@@ -49,7 +49,8 @@ For global storage, `T = G * block_size`, `B = 2^k`, reusable device workspace i
 - Accumulators: `8*T*B` bytes, `sums[g*B+bin]` or `sums[bin*T+g]`.
 - Partials: `8*G*B` bytes, always `partials[bin*G+block]`.
 - Output: `8*B` bytes; positions: `k*sizeof(unsigned)` bytes.
-- Separate shared scratch: 16 doubles (128 bytes) per block in either kernel.
+- Separate shared scratch: 32 doubles (256 bytes) per block in either custom kernel,
+  enough for one sum from each warp of a 1024-thread block.
 
 Every invocation initializes all accumulators and overwrites all partials and
 outputs. `GlobalReduction` retains its original global default; its optional
@@ -86,7 +87,7 @@ and sanitizer results remain unverified. No 32 GiB benchmark was run.
 Step 3 shared storage allocates no global accumulator buffer. Each thread owns
 B double accumulators at `sums[t*B+bin]` or `sums[bin*S+t]`, initialized on every
 invocation. Dynamic shared bytes are `8*S*B`, already aligned to eight bytes;
-the exact kernel's static scratch (currently 128 bytes) is added for limit
+the exact kernel's static scratch (currently 256 bytes for custom kernels) is added for limit
 checks. The constructor queries the selected device, both kernel attributes,
 and occupancy, requesting dynamic shared opt-in before rejecting a feasible
 request. Diagnostics include requested bytes and device/kernel limits. No block
@@ -98,9 +99,12 @@ Shared dynamic requirements in KiB (add actual static scratch):
 
 | Block size | k=1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 32 | 0.5 | 1 | 2 | 4 | 8 | 16 | 32 | 64 |
+| 64 | 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128 |
 | 128 | 2 | 4 | 8 | 16 | 32 | 64 | 128 | 256 |
 | 256 | 4 | 8 | 16 | 32 | 64 | 128 | 256 | 512 |
 | 512 | 8 | 16 | 32 | 64 | 128 | 256 | 512 | 1024 |
+| 1024 | 16 | 32 | 64 | 128 | 256 | 512 | 1024 | 2048 |
 
 The register candidate uses eight named double scalars, independent of runtime
 k, and runtime switches for accumulation and reduction. Its capacity is eight
@@ -129,13 +133,13 @@ missing or ambiguous evidence remains unverified. Enabling a verified kernel
 requires a reviewed, build/architecture-bound evidence gate and GPU correctness
 and resource tests. No architecture is certified by this change.
 
-Step 3 validation status in this environment (2026-10-31):
+Storage validation status in this environment (2026-11-02):
 
 | Method | Requested configurations | Result here |
 | --- | --- | --- |
-| Global, both layouts | S=128/256/512, k=1..8 | CUDA unavailable; preserved implementation |
-| Shared, both layouts | S=128/256/512, k=1..8 | CUDA unavailable; device support unverified |
-| Registers, layout n/a | S=128/256/512, k=1..3 | Residency unverified; timing disabled |
+| Global, both layouts | S=32/64/128/256/512/1024, k=1..8 | CUDA unavailable; device execution unverified |
+| Shared, both layouts | S=32/64/128/256/512/1024, k=1..8 | CUDA unavailable; device support unverified |
+| Registers, layout n/a | S=32/64/128/256/512/1024, k=1..3 | Residency unverified; timing disabled |
 | Registers, layout n/a | k=4..8 | Unsupported: exceeds eight-bin capacity |
 
 `make test-host` passed. `make test-cuda` and `make sanitize` could not build
@@ -210,7 +214,7 @@ benchmark metadata. The strict atomic-free requirement remains in force; the
 selected build's atomic-free audit status is **unverified**. API compatibility,
 numerical validation and timing do not establish atomic-free execution. See
 [the CUB policy and historical source evidence](docs/cub-baselines.md).
-`BlockPrimitive::cub` selects matched BlockReduce kernels at S=128/256/512,
+`BlockPrimitive::cub` selects matched BlockReduce kernels at S=32/64/128/256/512/1024,
 with independent resource inspection and register/cooperative gates.
 `SegmentedReduction` runs once with custom tuning fields n/a and signed 64-bit
 lazy gather and segment offsets, including the exclusive N=2^31 endpoint.
