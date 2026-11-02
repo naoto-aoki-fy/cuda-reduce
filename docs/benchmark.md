@@ -50,7 +50,7 @@ make benchmark-full BENCHMARK_ARGS='--block-sizes 32,64,128,256,512,1024 --repet
 
 The full preset fixes q=31, N=2147483648, and the state alone consumes
 34359738368 bytes (32 GiB). It rejects `--qubits`; it never substitutes a smaller
-state. Both matrix presets own `--positions` and `--sm-multiplier` and reject
+state. All matrix presets own `--positions` and `--sm-multiplier` and reject
 those overrides. `--block-sizes` accepts a distinct comma-separated selection
 from 32,64,128,256,512,1024; it defaults to `--block-size` (256). Measured repetitions
 default to 1 and warmups to 3.
@@ -69,6 +69,25 @@ rows, as do register requests beyond the existing eight-bin capacity (k>3).
 Even coincident position bands on a small smoke input retain separate labels.
 Unsupported requests remain rows with explicit diagnostics. Segmented custom
 fields and register layout are JSON null (not applicable).
+
+To select exactly the k=4 subset of `full`:
+
+```sh
+make benchmark-full-k4 BENCHMARK_ARGS='--block-sizes 256 --repetitions 1 --warmups 3'
+# Optional output prefix:
+make benchmark-full-k4 BENCHMARK_K4_RESULTS=build/k4-run/results
+```
+
+This target uses `--preset full-k4` and defaults to
+`build/full-k4/results.json` and `build/full-k4/results.csv`. It fixes q=31
+(the same 32 GiB input), rejects `--qubits`, and retains low/middle/high bands,
+all reduction methods, storage/layout choices, block sizes and SM multipliers.
+Timing, validation, scheduling and result reporting use the shared full benchmark
+implementation. There are 153 requested rows with the default block size, or 903
+with all six sizes. Unsupported configurations, including every k=4 register
+request, remain explicit rows. `make test-host` verifies the exact subset with
+defaults and overrides. `benchmark-full` (k=1..16) and `benchmark-full-k1-6`
+(k=1..6) retain their existing behavior and output locations.
 
 For block-size comparisons, group CSV/JSON rows by workload (q and ordered
 positions), method, storage, layout, strategy and SM multiplier, then compare
@@ -360,7 +379,7 @@ cases, preserves the relative schedule of pending cases, and initializes the
 same state again for each q with remaining work. Input and position generation
 retain their independent seeds.
 
-The same heuristic schedules the C++ `single`, `smoke`, `full`, and `full-k1-6`
+The same heuristic schedules the C++ `single`, `smoke`, `full`, `full-k1-6`, and `full-k4`
 presets. It estimates relative work units, not milliseconds, without calibration:
 
 - Let `N=2^q`, `B=2^k`, and `T=128 * sm_multiplier * block_size`. The fixed

@@ -14,7 +14,7 @@ int main() {
   assert(segmented == 48);
   // Scheduling never renumbers the matrix used by --profile-case. Every case
   // appears exactly once, with ascending estimated work and stable ties.
-  for (const char* preset : {"full", "full-k1-6", "smoke", "single"}) {
+  for (const char* preset : {"full", "full-k1-6", "full-k4", "smoke", "single"}) {
     const char* args[] = {"test", "--preset", preset};
     auto opts = options(3, const_cast<char**>(args));
     auto planned = matrix(opts);
@@ -73,6 +73,52 @@ int main() {
       assert(limited.references[i].positions.size() == i / 3 + 1);
     }
   }
+  // full-k4 is the exact k=4 subset, with locally renumbered references.
+  // Check defaults and all block sizes with timing/resource/validation overrides.
+  for (bool overrides : {false, true}) {
+    std::vector<const char*> args{"test", "--preset", "full"};
+    if (overrides) {
+      const std::vector<const char*> extra{"--block-sizes", "32,64,128,256,512,1024",
+        "--repetitions", "2", "--warmups", "4", "--seed", "42", "--chunk-elements", "128",
+        "--case-budget-ms", "100", "--run-budget-ms", "200", "--validation", "skip",
+        "--workspace-limit-bytes", "1024", "--memory-reserve-bytes", "512"};
+      args.insert(args.end(), extra.begin(), extra.end());
+    }
+    auto original = options(static_cast<int>(args.size()), const_cast<char**>(args.data()));
+    args[2] = "full-k4";
+    auto restricted = options(static_cast<int>(args.size()), const_cast<char**>(args.data()));
+    assert(restricted.config.qubits == 31);
+    assert(std::tie(original.blocks, original.validate, original.workspace_limit,
+                    original.memory_reserve, original.run_budget_ms, original.prefix)
+        == std::tie(restricted.blocks, restricted.validate, restricted.workspace_limit,
+                    restricted.memory_reserve, restricted.run_budget_ms, restricted.prefix));
+    auto full_matrix = matrix(original), limited = matrix(restricted);
+    auto fields = [](const Config& c) {
+      return std::tie(c.qubits, c.positions, c.block_size, c.sm_multiplier,
+                      c.repetitions, c.warmups, c.seed, c.chunk_elements, c.case_budget_ms);
+    };
+    assert(limited.references.size() == 3);
+    assert(limited.cases.size() == (overrides ? 903 : 153));
+    std::size_t expected = 0, register_requests = 0, segmented_requests = 0;
+    for (const auto& x : full_matrix.cases) {
+      if (x.c.positions.size() != 4) continue;
+      const auto& y = limited.cases.at(expected++);
+      assert(fields(x.c) == fields(y.c));
+      assert(std::tie(x.band, x.primitive, x.storage, x.layout, x.segmented)
+          == std::tie(y.band, y.primitive, y.storage, y.layout, y.segmented));
+      assert(y.reference == x.reference - 9);
+      assert(fields(full_matrix.references.at(x.reference)) == fields(limited.references.at(y.reference)));
+      register_requests += y.storage == AccumulatorStorage::registers;
+      segmented_requests += y.segmented;
+    }
+    assert(expected == limited.cases.size());
+    // k=4 register requests exceed the eight-bin capacity; retain all of them.
+    assert(register_requests == (overrides ? 180 : 30));
+    assert(segmented_requests == 3);
+    std::size_t band_index = 0;
+    for (const char* band : {"low", "middle", "high"})
+      assert(limited.references[band_index++].positions == contiguous_positions(31, 4, band));
+  }
   const char* blocks[] = {"test", "--preset", "full", "--block-sizes", "128,256,512"};
   assert(matrix(options(5, const_cast<char**>(blocks))).cases.size() == 7248);
   const char* all_blocks[] = {"test", "--preset", "full", "--block-sizes", "32,64,128,256,512,1024"};
@@ -98,7 +144,7 @@ int main() {
   assert(m.references.size() == 1 && m.cases.size() == 11);
   assert(m.references[0].positions == (std::vector<unsigned>{7,1}));
   for (const auto* key : {"--qubits", "--positions", "--sm-multiplier"}) {
-    for (const auto* preset : {"full", "full-k1-6"}) {
+    for (const auto* preset : {"full", "full-k1-6", "full-k4"}) {
       const char* bad[] = {"test", "--preset", preset, key, "1"};
       bool rejected = false;
       try { options(5, const_cast<char**>(bad)); } catch (const std::invalid_argument&) { rejected=true; }

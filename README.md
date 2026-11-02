@@ -206,6 +206,19 @@ requested cases by default, including unsupported ones. Results go to the separa
 directory `build/full-k1-6/` as `results.json` and `results.csv`; override the prefix
 with `BENCHMARK_K1_6_RESULTS=path/to/results`. The `benchmark-full` target retains its k=1..16 sweep.
 
+To run only k=4 with the same full-size input and measurement settings:
+
+```sh
+make benchmark-full-k4 BENCHMARK_ARGS='--block-sizes 256 --repetitions 1 --warmups 3'
+```
+
+The `full-k4` preset keeps q=31, all three position bands and every method,
+storage/layout choice and SM multiplier from `full`. It retains all 153 requested
+cases by default, including unsupported configurations, with the same timing,
+validation and reporting behavior. Results go to `build/full-k4/results.json`
+and `build/full-k4/results.csv`; override the prefix with
+`BENCHMARK_K4_RESULTS=path/to/results`. Existing full benchmark targets are unchanged.
+
 Validation after removing the single-kernel synchronization variant (2026-11-02):
 `make` and `make test-host` pass, including both C++ host suites and nine Python
 tests. All four staged JSON plans generate successfully in dry-run mode.
