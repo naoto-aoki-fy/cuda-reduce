@@ -87,6 +87,61 @@ class MatrixTests(unittest.TestCase):
         reg['candidate']['storage']='registers'
         self.assertIn('audit', bm.estimate(reg,d,settings)['resource_rejection_reason'])
 
+    def test_grid_cli_dry_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp)/'config.json'
+            config.write_text(json.dumps(self.config()))
+            command = [sys.executable, str(ROOT/'tools/benchmark_matrix.py'), '--matrix-config', str(config),
+                       '--dry-run', '--results', str(Path(tmp)/'grid'), '--grid-block-counts', '32,64']
+            result = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = json.loads((Path(tmp)/'grid.plan.json').read_text())
+            self.assertEqual(len(data['cases']), len(bm.plan(self.config())[2])) # Segmented stays deduplicated.
+            config.write_text(json.dumps(dict(self.config(), candidates=dict(methods=['custom'],
+                                  storage=['global'], layouts=['thread_major'], block_sizes=[256]))))
+            result = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = json.loads((Path(tmp)/'grid.plan.json').read_text())
+            self.assertEqual({c['candidate']['grid_blocks'] for c in data['cases']}, {32,64})
+            self.assertEqual({c['estimated_blocks'] for c in data['cases']}, {32,64})
+            for counts in ('0', '32,32', '32,', '-1', 'bad'):
+                self.assertNotEqual(subprocess.run(command[:-1]+[counts], capture_output=True).returncode, 0)
+            config.write_text(json.dumps(dict(self.config(), candidates=dict(sm_multipliers=[1]))))
+            self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
+
+    def test_exact_grid_counts(self):
+        spec = dict(methods=['custom','cub','segmented'], storage=['global'], layouts=['thread_major'],
+                    block_sizes=[128,256], grid_block_counts=[32,64,128,256,512,1024])
+        settings, workloads, cases = bm.plan(dict(self.config(), candidates=spec))
+        self.assertEqual(len(cases), len(workloads)*25)
+        self.assertEqual(len({c['candidate_id'] for c in cases}), 25)
+        device = dict(SM_count=108, shared_memory_optin_per_block=163840,
+                      initial_free_device_bytes=80*1024**3)
+        for case in cases:
+            c, w = case['candidate'], case['workload']
+            if c['method'] == 'segmented':
+                self.assertEqual(c, dict(method='segmented'))
+                continue
+            self.assertNotIn('sm_multiplier', c)
+            r = bm.estimate(case, device, settings)
+            expected = 8*c['grid_blocks']*(c['block_size']+1)*w['bins']+8*w['bins']+4*w['k']
+            self.assertEqual(r['estimated_workspace_bytes'], expected)
+            self.assertEqual(r['estimated_blocks'], c['grid_blocks'])
+            self.assertEqual(bm.estimate(case, None, settings)['estimated_workspace_bytes'], expected)
+            self.assertEqual(bm.estimate(case, dict(device, SM_count=7), settings), r)
+            self.assertIn('workspace', bm.estimate(case, device, dict(settings, workspace_limit_bytes=expected-1))['resource_rejection_reason'])
+        entry = dict(method='custom', storage='global', layout='thread_major', block_size=256,
+                     grid_blocks=32, strategy='two_kernel')
+        self.assertEqual(bm.candidates(dict(include=[entry])), [entry])
+        for bad in [dict(spec, sm_multipliers=[1]), dict(spec, grid_block_counts=[]),
+                    *[dict(spec, grid_block_counts=v) for v in ([0],[-1],[True],[32.0],[32,32])],
+                    dict(include=[dict(entry, sm_multiplier=1)])]:
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                bm.candidates(bad)
+        huge = copy.deepcopy(cases[0])
+        huge['candidate']['grid_blocks'] = 1 << 31
+        self.assertIn('grid', bm.estimate(huge, device, settings)['resource_rejection_reason'])
+
     def test_truncated_journal_and_export(self):
         with tempfile.TemporaryDirectory() as tmp:
             prefix=Path(tmp)/'r'
@@ -115,7 +170,9 @@ class MatrixTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp=Path(tmp)
             config=self.config()
-            config.update(q=[12],k=[1],positions=dict(patterns=['low']))
+            config.update(q=[12],k=[1],positions=dict(patterns=['low']),
+                          candidates=dict(methods=['custom'],storage=['global'],layouts=['thread_major'],
+                                          block_sizes=[256],grid_block_counts=[32,64]))
             conf=tmp/'plan.json'
             conf.write_text(json.dumps(config))
             binary=tmp/'fake'
@@ -127,7 +184,9 @@ if '--device-info' in args:
 else:
  with pathlib.Path(__file__).with_suffix('.calls').open('a') as f: f.write('call\\n')
  for i,line in enumerate(pathlib.Path(args['--case-plan']).read_text().splitlines()):
-  print('MEASUREMENT_ROW '+json.dumps(dict(case_id=i,status='success',timing_status='stopped' if os.environ.get('FAKE_PARTIAL') else 'success',workspace_bytes=10,raw_elapsed_ms=[1.0],completed_repetitions=1)),flush=True)
+  fields=line.split()
+  assert len(fields)==9 and fields[7]=='1' and int(fields[8]) in (32,64)
+  print('MEASUREMENT_ROW '+json.dumps(dict(case_id=i,blocks=int(fields[8]),status='success',timing_status='stopped' if os.environ.get('FAKE_PARTIAL') else 'success',workspace_bytes=10,raw_elapsed_ms=[1.0],completed_repetitions=1)),flush=True)
   if os.environ.get('FAKE_CRASH'): sys.exit(9)
 ''')
             binary.chmod(0o755)
@@ -143,7 +202,18 @@ else:
             with journal.open('a') as f: f.write('{')
             self.assertEqual(subprocess.run(command+['--resume'],capture_output=True).returncode,0)
             rows=json.loads((tmp/'r.json').read_text())['results']
-            self.assertEqual(len(rows),1)
+            self.assertEqual(len(rows),2)
+            self.assertEqual({r['grid_blocks'] for r in rows}, {32,64})
+            self.assertTrue(all(r['blocks']==r['grid_blocks'] and r['sm_multiplier'] is None for r in rows))
+            with (tmp/'r.csv').open() as f:
+                exported=list(csv.DictReader(f))
+            self.assertEqual({json.loads(r['grid_blocks']) for r in exported},{32,64})
+            altered=copy.deepcopy(config)
+            altered['candidates']['grid_block_counts']=[32,128]
+            conf.write_text(json.dumps(altered))
+            changed=subprocess.run(command+['--resume'],capture_output=True,text=True)
+            self.assertIn('incompatible resume',changed.stderr)
+            conf.write_text(json.dumps(config))
             changed=subprocess.run(command+['--resume','--repetitions','2'],capture_output=True,text=True)
             self.assertNotEqual(changed.returncode,0)
             self.assertIn('incompatible resume',changed.stderr)
@@ -159,8 +229,8 @@ else:
             result=subprocess.run(interrupted+['--resume'],capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stderr)
             data=json.loads((tmp/'crash.json').read_text())['results']
-            self.assertEqual(len(data),2)
-            self.assertEqual(len({r['case_key'] for r in data}),2)
+            self.assertEqual(len(data),4)
+            self.assertEqual(len({r['case_key'] for r in data}),4)
             # Budget-stopped timings retain raw samples, then retry on resume.
             partial_cmd=command[:-1]+[str(tmp/'partial')]
             result=subprocess.run(partial_cmd,capture_output=True,text=True,env=dict(os.environ,FAKE_PARTIAL='1'))

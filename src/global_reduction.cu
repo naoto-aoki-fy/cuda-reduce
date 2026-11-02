@@ -296,6 +296,8 @@ ReductionResources reduction_resources(const Config& c, AccumulatorStorage stora
   r.sm_count = prop.multiProcessorCount;
   if (r.cooperative && !prop.cooperativeLaunch)
     throw Unsupported("device does not support cooperative launch");
+  if (c.grid_blocks && *c.grid_blocks > static_cast<Size>(prop.maxGridSize[0]))
+    throw Unsupported("requested grid exceeds device limits");
   r.blocks = launch_blocks(c, static_cast<Size>(prop.multiProcessorCount));
   r.default_shared_limit = prop.sharedMemPerBlock;
   r.optin_shared_limit = prop.sharedMemPerBlockOptin;

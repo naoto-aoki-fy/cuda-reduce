@@ -142,7 +142,8 @@ Fields row_template(const Case& x, Size id, const Options& o) {
   row["storage"] = x.segmented ? "null" : json_quote(x.storage == AccumulatorStorage::registers ? "registers" : x.storage == AccumulatorStorage::shared ? "shared" : "global");
   row["layout"] = x.segmented || x.storage == AccumulatorStorage::registers ? "null" : json_quote(x.layout == GlobalLayout::thread_major ? "thread_major" : "bin_major");
   row["block_size"] = x.segmented ? "null" : number(x.c.block_size);
-  row["sm_multiplier"] = x.segmented ? "null" : number(x.c.sm_multiplier);
+  row["sm_multiplier"] = x.segmented || x.c.grid_blocks ? "null" : number(x.c.sm_multiplier);
+  row["grid_blocks"] = x.segmented || !x.c.grid_blocks ? "null" : number(*x.c.grid_blocks);
   row["status"] = json_quote("not_run"); row["timing_status"] = json_quote("not_run");
   row["validation_status"] = json_quote(o.validate ? "not_run" : "skipped");
   row["validation_reason"] = json_quote(""); row["reason"] = json_quote(""); row["resources"] = "null";
@@ -329,6 +330,7 @@ int main(int argc, char** argv) {
         }
         if (status == Status::success && !x.segmented && !o.profile_case) {
           std::string key = number(x.reference) + ':' + number(x.c.block_size) + ':' + number(x.c.sm_multiplier) +
+            ':' + (x.c.grid_blocks ? number(*x.c.grid_blocks) : "SM") +
             ':' + number(int(x.primitive)) + ':' + number(int(x.storage)) + ':' + number(int(x.layout));
           if (x.method == ReductionMethod::two_kernel) matching[key] = output;
           else {

@@ -52,6 +52,8 @@ void check_case(Config c, const std::vector<std::complex<double>>& values,
     cuda_check(cudaMemcpy(state.data(), staging.data(), allocation_bytes(state.size(), sizeof(staging[0])),
                           cudaMemcpyHostToDevice));
     GlobalReduction reduction(c, layout, storage);
+    if (c.grid_blocks && reduction.blocks() != *c.grid_blocks)
+      throw std::runtime_error("explicit grid count changed");
     reduction.poison(stream.value);
     for (unsigned repeat = 0; repeat < 3; ++repeat) {
       if (repeat == 2) cuda_check(cudaMemsetAsync(state.data(), 0,
@@ -106,6 +108,17 @@ int main(int argc, char**) {
           }
         }
       }
+    }
+    for (Size grid : {32,64,128,256,512,1024}) {
+      auto fixture = deterministic_fixtures()[2];
+      fixture.config.grid_blocks = grid;
+      check_case(fixture.config, fixture.amplitudes, &fixture.expected); ++cases;
+    }
+    { // A non-power-of-two exact grid with a grid-stride tail.
+      Config c; c.qubits = 14; c.positions = {13,1}; c.grid_blocks = 33; c.block_size = 128;
+      std::vector<std::complex<double>> values(c.state_size());
+      for (Size j = 0; j < values.size(); ++j) values[j] = {double(j % 7)/7, double(j % 11)/11};
+      check_case(c, values); ++cases;
     }
     // Resource/capacity rejection must occur before allocation or execution.
     for (unsigned k : {1u, 3u, 4u, 8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u, 16u}) {

@@ -55,6 +55,27 @@ those overrides. `--block-sizes` accepts a distinct comma-separated selection
 from 128,256,512; it defaults to `--block-size` (256). Measured repetitions
 default to 1 and warmups to 3.
 
+To sweep exact total grid block counts independently of the GPU's SM count:
+
+```sh
+make benchmark-full BENCHMARK_ARGS='--grid-block-counts 32,64,128,256,512,1024 --block-sizes 256 --repetitions 5 --warmups 3'
+```
+
+`--grid-block-counts` accepts distinct positive integers. It replaces the SM
+multiplier sweep; it cannot be combined with `--sm-multiplier`. The same option
+works with `single` and `smoke`. `--block-sizes` still controls threads per block
+independently. Both reduction stages launch exactly the requested grid, and
+workspace sizing, resource checks and validation use that same configuration.
+No request is rounded, capped or silently replaced. Device limits and existing
+register/cooperative policy gates still produce unsupported rows.
+
+JSON/CSV `grid_blocks` records the explicit requested count, while `blocks`
+records the grid accepted by runtime resource checks (null when not established,
+including early rejection). In explicit mode `sm_multiplier` is null; in SM mode
+`grid_blocks` is null. Segmented CUB manages its own grid, so these tuning fields
+remain null and its baseline runs once per workload. With the six counts and
+one block size, the full preset produces **5808 rows**.
+
 Each of 48 measurement configurations (k=1..16 times three position bands) has,
 for each block size and multiplier, 20 rows: custom/CUB BlockReduce times two
 strategies times five storage/layout choices (registers with layout n/a, shared
@@ -269,6 +290,45 @@ Example schema (all field names are strict; unknown fields are errors):
   }
 }
 ```
+
+For an exact grid sweep, replace `sm_multipliers` in `candidates` with
+`"grid_block_counts": [32, 64, 128, 256, 512, 1024]` and set
+`"block_sizes": [256]`. The two count filters are mutually exclusive. A complete
+small-input example suitable for planning and GPU validation is:
+
+```json
+{
+  "version": 1,
+  "q": [12],
+  "k": [1, 3],
+  "positions": {"patterns": ["low", "high"]},
+  "candidates": {
+    "methods": ["custom", "cub", "segmented"],
+    "storage": ["global"],
+    "layouts": ["thread_major"],
+    "block_sizes": [256],
+    "grid_block_counts": [32, 64, 128, 256, 512, 1024],
+    "strategies": ["two_kernel"]
+  },
+  "measurement": {"warmups": 3, "repetitions": 5}
+}
+```
+
+Save as `build/grid-matrix.json`, then run:
+
+```sh
+make benchmark-full BENCHMARK_RESULTS=build/grid BENCHMARK_ARGS='--matrix-config build/grid-matrix.json --dry-run'
+make benchmark-full BENCHMARK_RESULTS=build/grid BENCHMARK_ARGS='--matrix-config build/grid-matrix.json'
+make benchmark-full BENCHMARK_RESULTS=build/grid BENCHMARK_ARGS='--matrix-config build/grid-matrix.json --resume'
+```
+
+Alternatively, the matrix CLI accepts `--grid-block-counts` when the JSON
+candidate filters omit both count filters and `include`. Explicit candidates in
+`include` use `"grid_blocks": 64` in place of `"sm_multiplier": 4`; each custom
+or BlockReduce candidate requires exactly one of these fields. Counts form part
+of candidate IDs and case keys, so different counts remain distinct. Resume
+requires the same counts and settings and rejects changed sweeps. Dry-run
+estimates use exact grid counts even without querying a GPU.
 
 `q` accepts a nonempty list in [1,59], bounded by uint64 input-byte arithmetic;
 large requests are subject to runtime feasibility. `k` accepts a nonempty list

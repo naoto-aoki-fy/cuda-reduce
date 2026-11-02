@@ -53,7 +53,7 @@ Do not replace a required `grid.sync()` with a custom spin barrier to work aroun
 
 ### Launch and benchmark contract
 
-- For custom reduction kernels, use exactly `G = SM_count * sm_multiplier` blocks, including the second reduction kernel.
+- For custom reduction kernels, use exactly `G = SM_count * sm_multiplier` blocks by default, including the second reduction kernel. An explicit `grid_blocks` override replaces that formula for both stages and all resource/workspace calculations.
 - Default `sm_multiplier`: 8.
 - Default block size: 256; make it configurable and document supported values.
 - Do not silently change the requested block count, block size, storage backend, or problem size.

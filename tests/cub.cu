@@ -62,6 +62,8 @@ void check(Config c, bool segmented_only = false) {
                   << " unsupported: " << e.what() << '\n';
         continue;
       }
+      if (c.grid_blocks && reduction->blocks() != *c.grid_blocks)
+        throw std::runtime_error("CUB explicit grid count changed");
       reduction->poison(stream.value);
       reuse(*reduction, state, values, expected, stream.value);
     }
@@ -83,6 +85,11 @@ int main() {
         Config c; c.qubits = q; c.positions = p; check(c);
       }
     }
+    for (Size grid : {32,64,128,256,512,1024}) {
+      Config c; c.qubits = 8; c.positions = {7,1}; c.grid_blocks = grid;
+      check(c);
+    }
+    { Config c; c.qubits = 14; c.positions = {13,1}; c.grid_blocks = 33; check(c); }
     // Exercise the expanded gather descriptor on bounded input, avoiding the
     // large per-thread global workspace required by these measurement counts.
     for (unsigned k = 9; k <= 16; ++k) {

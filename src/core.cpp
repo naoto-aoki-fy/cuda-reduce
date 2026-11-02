@@ -38,6 +38,7 @@ void Config::validate() const {
     throw std::invalid_argument("supported block sizes: 128,256,512");
   if (!sm_multiplier || !repetitions || !chunk_elements)
     throw std::invalid_argument("multiplier, repetitions and chunk size must be positive");
+  if (grid_blocks && !*grid_blocks) throw std::invalid_argument("grid blocks must be positive");
   allocation_bytes(state_size(), 2 * sizeof(double));
   allocation_bytes(chunk_elements, sizeof(std::complex<double>));
 }
@@ -97,7 +98,7 @@ std::vector<unsigned> contiguous_positions(unsigned q, unsigned k, const std::st
 Size launch_blocks(const Config& c, Size sm_count) {
   c.validate();
   if (!sm_count) throw std::invalid_argument("zero SM count");
-  Size blocks = checked_mul(sm_count, c.sm_multiplier);
+  Size blocks = c.grid_blocks ? *c.grid_blocks : checked_mul(sm_count, c.sm_multiplier);
   if (blocks > static_cast<Size>(std::numeric_limits<int>::max()))
     throw std::overflow_error("grid x exceeds CUDA launch limit");
   return blocks;

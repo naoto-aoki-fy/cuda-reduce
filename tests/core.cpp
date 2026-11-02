@@ -23,6 +23,17 @@ int main() {
       Config c; c.block_size = block;
       c.validate(); require(launch_blocks(c, 7) == 56);
     }
+    for (Size grid : {32,64,128,256,512,1024}) {
+      Config c; c.grid_blocks = grid;
+      require(launch_blocks(c, 7) == grid && launch_blocks(c, 108) == grid);
+      c.sm_multiplier = std::numeric_limits<Size>::max();
+      require(launch_blocks(c, 108) == grid); // No unused multiplier overflow.
+    }
+    { Config c; c.grid_blocks = 0;
+      rejects<std::invalid_argument>([&] { c.validate(); });
+      c.grid_blocks = Size{1} << 31;
+      rejects<std::overflow_error>([&] { launch_blocks(c, 7); });
+    }
     for (unsigned block : {0u, 32u, 129u, 1024u}) {
       Config c; c.block_size = block;
       rejects<std::invalid_argument>([&] { c.validate(); });

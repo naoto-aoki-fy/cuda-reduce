@@ -22,6 +22,7 @@ struct Config {
   std::vector<unsigned> positions{0};
   unsigned block_size = 256;
   Size sm_multiplier = 8;
+  std::optional<Size> grid_blocks; // exact grid-x override; independent of SM count
   Size repetitions = 1;
   Size warmups = 3;
   Size seed = default_seed;

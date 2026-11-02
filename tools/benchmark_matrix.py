@@ -109,13 +109,13 @@ STRATEGIES = ['two_kernel', 'cooperative']
 
 
 def candidates(spec):
-    keys(spec, ['methods', 'storage', 'layouts', 'block_sizes', 'sm_multipliers', 'strategies', 'include'], 'candidates')
+    keys(spec, ['methods', 'storage', 'layouts', 'block_sizes', 'sm_multipliers', 'grid_block_counts', 'strategies', 'include'], 'candidates')
     if 'include' in spec:
         if len(spec) != 1 or not isinstance(spec['include'], list) or not spec['include']:
             raise ValueError('include must be a nonempty list and cannot be mixed with filters')
         result = []
         for entry in spec['include']:
-            keys(entry, ['method', 'storage', 'layout', 'block_size', 'sm_multiplier', 'strategy'], 'included candidate')
+            keys(entry, ['method', 'storage', 'layout', 'block_size', 'sm_multiplier', 'grid_blocks', 'strategy'], 'included candidate')
             method = entry.get('method')
             choices([method], METHODS, 'method')
             if method == 'segmented':
@@ -123,14 +123,19 @@ def candidates(spec):
                     raise ValueError('segmented has no custom tuning fields')
                 result.append(dict(method=method))
             else:
-                required = {'method', 'storage', 'block_size', 'sm_multiplier', 'strategy'}
+                required = {'method', 'storage', 'block_size', 'strategy'}
+                if ('sm_multiplier' in entry) == ('grid_blocks' in entry):
+                    raise ValueError('candidate requires exactly one of sm_multiplier or grid_blocks')
                 if not required <= set(entry) or (entry['storage'] != 'registers' and 'layout' not in entry):
                     raise ValueError('included candidate missing tuning fields')
                 choices([entry['storage']], STORAGE, 'storage')
                 choices([entry['strategy']], STRATEGIES, 'strategy')
                 integer(entry['block_size'], 'block_size', 128, 512)
                 choices([entry['block_size']], [128, 256, 512], 'block_size')
-                integer(entry['sm_multiplier'], 'sm_multiplier', 1, (1 << 31)-1)
+                if 'grid_blocks' in entry:
+                    integer(entry['grid_blocks'], 'grid_blocks', 1)
+                else:
+                    integer(entry['sm_multiplier'], 'sm_multiplier', 1, (1 << 31)-1)
                 if entry['storage'] == 'registers':
                     if 'layout' in entry:
                         raise ValueError('register layout is not applicable')
@@ -144,11 +149,17 @@ def candidates(spec):
         blocks = choices(spec.get('block_sizes', [128, 256, 512]), [128, 256, 512], 'block_sizes')
         for block in blocks:
             integer(block, 'block_size', 128, 512)
-        multipliers = spec.get('sm_multipliers', [1, 2, 4, 8, 16])
-        if not isinstance(multipliers, list) or not multipliers:
-            raise ValueError('sm_multipliers must be a nonempty list')
-        for m in multipliers:
-            integer(m, 'sm_multiplier', 1, (1 << 31)-1)
+        if 'grid_block_counts' in spec and 'sm_multipliers' in spec:
+            raise ValueError('grid_block_counts cannot be combined with sm_multipliers')
+        grid_mode = 'grid_block_counts' in spec
+        grid_key = 'grid_blocks' if grid_mode else 'sm_multiplier'
+        counts = spec.get('grid_block_counts' if grid_mode else 'sm_multipliers', [1, 2, 4, 8, 16])
+        if not isinstance(counts, list) or not counts:
+            raise ValueError('grid counts must be a nonempty list')
+        for count in counts:
+            integer(count, grid_key, 1, (1 << 64)-1 if grid_mode else (1 << 31)-1)
+        if grid_mode and len(set(counts)) != len(counts):
+            raise ValueError('duplicate grid counts')
         strategies = choices(spec.get('strategies', ['two_kernel']), STRATEGIES, 'strategies')
         result = []
         for method in methods:
@@ -156,11 +167,12 @@ def candidates(spec):
                 result.append(dict(method=method))
                 continue
             for b in blocks:
-                for m in multipliers:
+                for m in counts:
                     for st in storage:
                         for layout in ([None] if st == 'registers' else layouts):
                             for strategy in strategies:
-                                c = dict(method=method, storage=st, block_size=b, sm_multiplier=m, strategy=strategy)
+                                c = dict(method=method, storage=st, block_size=b, strategy=strategy)
+                                c[grid_key] = m
                                 if layout is not None:
                                     c['layout'] = layout
                                 result.append(c)
@@ -232,19 +244,23 @@ def estimate(case, device, settings):
         reason = 'register capacity exceeded' if k > 3 else 'register residency audit unverified'
     elif c.get('strategy') == 'cooperative':
         reason = 'cooperative synchronization strict atomic policy unverified'
+    requested = c.get('grid_blocks')
+    minimum_grid = requested if requested is not None else c.get('sm_multiplier')
     lower_bound = 8*b + 1 if c['method']=='segmented' else (
-        (8*c['sm_multiplier']*c['block_size']*b if c['storage']=='global' else 0)
-        + 8*c['sm_multiplier']*b + 8*b + 4*k)
+        (8*minimum_grid*c['block_size']*b if c['storage']=='global' else 0)
+        + 8*minimum_grid*b + 8*b + 4*k)
     if lower_bound > settings['workspace_limit_bytes']:
         reason = reason or 'workspace lower bound exceeds memory limit'
-    if c['method'] != 'segmented' and device:
-        grid = device['SM_count'] * c['sm_multiplier']
+    if c['method'] != 'segmented' and (device or requested is not None):
+        grid = requested if requested is not None else device['SM_count'] * c['sm_multiplier']
+        if grid > (1 << 31)-1:
+            reason = reason or 'requested grid exceeds CUDA grid-x limit'
         threads = grid * c['block_size']
         accumulator = 8 * threads * b if c['storage'] == 'global' else 0
         workspace = accumulator + 8 * grid * b + 8*b + 4*k
         if workspace > settings['workspace_limit_bytes']:
             reason = reason or 'workspace memory limit exceeded'
-        if c['storage'] == 'shared' and 8*c['block_size']*b > device['shared_memory_optin_per_block']:
+        if device and c['storage'] == 'shared' and 8*c['block_size']*b > device['shared_memory_optin_per_block']:
             reason = reason or 'shared accumulator alone exceeds device shared memory limit'
     if device:
         available = device['initial_free_device_bytes'] - settings['memory_reserve_bytes']
@@ -318,7 +334,7 @@ def base_row(case, settings, run_id, index):
                 state_bytes=w['input_bytes'], input_bytes=w['input_bytes'],
                 method={'custom': 'custom', 'cub': 'CUB BlockReduce', 'segmented': 'CUB DeviceSegmentedReduce'}[c['method']],
                 strategy=c.get('strategy'), storage=c.get('storage'), layout=c.get('layout'),
-                block_size=c.get('block_size'), sm_multiplier=c.get('sm_multiplier'),
+                block_size=c.get('block_size'), sm_multiplier=c.get('sm_multiplier'), grid_blocks=c.get('grid_blocks'),
                 repetitions=settings['repetitions'], warmups=settings['warmups'], chunk_elements=settings['chunk_elements'],
                 status='not_run', reason='', timing_status='not_run', timing_mode='single_invocation',
                 raw_elapsed_ms=[], completed_repetitions=0, validation_status='skipped' if settings['validation']=='skip' else 'not_run',
@@ -367,6 +383,11 @@ def run(args):
     if not args.matrix_config:
         raise ValueError('--matrix-config is required')
     config = json.loads(Path(args.matrix_config).read_text())
+    if args.grid_block_counts is not None:
+        spec = config.setdefault('candidates', {})
+        if 'include' in spec or 'sm_multipliers' in spec or 'grid_block_counts' in spec:
+            raise ValueError('--grid-block-counts requires candidates without include or grid/SM count filters')
+        spec['grid_block_counts'] = [int(v) for v in args.grid_block_counts.split(',')]
     overrides = {k: getattr(args, k) for k in DEFAULTS if getattr(args, k, None) is not None}
     settings, workloads, cases = plan(config, overrides)
     prefix.parent.mkdir(parents=True, exist_ok=True)
@@ -443,7 +464,7 @@ def run(args):
                         w, c = case['workload'], case['candidate']
                         f.write(' '.join([','.join(map(str, w['positions'])), w['position_pattern'], c['method'],
                                           c.get('storage', 'global'), c.get('layout', 'thread_major'), c.get('strategy', 'two_kernel'),
-                                          str(c.get('block_size', 256)), str(c.get('sm_multiplier', 1))])+'\n')
+                                          str(c.get('block_size', 256)), str(c.get('sm_multiplier', 1)), str(c.get('grid_blocks', 0))])+'\n')
                 command = [str(binary), '--qubits', str(q), '--case-plan', str(path), '--stream-rows', '1',
                            '--results', str(Path(directory)/'raw')]
                 for name in ('seed', 'repetitions', 'warmups', 'chunk_elements', 'validation', 'memory_reserve_bytes',
@@ -497,6 +518,7 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--matrix-config')
+    parser.add_argument('--grid-block-counts', help='comma-separated exact grid-x counts; excludes SM filters')
     parser.add_argument('--results', default='build/full')
     parser.add_argument('--binary', default='build/measurement_validate')
     for flag in ('dry-run', 'resume', 'recover'):

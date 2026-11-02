@@ -39,7 +39,8 @@ unavailable. Runtime errors and numerical mismatches are failures; device/kernel
 resource limits and CUDA allocation exhaustion are explicit unsupported results.
 
 Supported block sizes are **128, 256, 512**, validated explicitly. Both kernels
-launch exactly `G = SM_count * sm_multiplier` blocks on the same stream. Each
+launch exactly `G = SM_count * sm_multiplier` blocks by default
+(or the explicit `grid_blocks` override) on the same stream. Each
 thread reads its grid-stride input elements once. Bin extraction uses the runtime
 ordered positions. Reductions use full-warp shuffles followed by shared scratch,
 with barriers before scratch reuse. The two-kernel reduction path uses no library reductions or atomics.
@@ -161,7 +162,7 @@ Before allocation or launch, eligibility checks query cooperative device support
 apply shared-memory opt-in to the actual combined kernel, query its attributes
 and occupancy with the requested block size and dynamic bytes, and calculate:
 
-- Requested blocks: `G = SM_count * sm_multiplier`.
+- Requested blocks: `G = grid_blocks` when specified, otherwise `SM_count * sm_multiplier`.
 - Resident block limit: `R = SM_count * active_blocks_per_SM(combined kernel, S, dynamic_bytes)`.
 - Eligible residency: `G <= R`; oversized requests throw `Unsupported` on the host.
 
@@ -235,3 +236,16 @@ to `build/full.json` and `build/full.csv`. Use
 profiling, reproducible builds and limitations. Step 6 tests were skipped as
 requested; `make host` succeeded and `make cuda` was blocked by missing nvcc.
 No full-size run, GPU validation or timing results are available here.
+
+Benchmark exact total CUDA grid block counts with independently fixed threads
+per block:
+
+```sh
+make benchmark-full BENCHMARK_ARGS='--grid-block-counts 32,64,128,256,512,1024 --block-sizes 256 --repetitions 5 --warmups 3'
+```
+
+This replaces the SM multiplier sweep. JSON matrix configurations support
+`candidates.grid_block_counts` or per-candidate `grid_blocks` in `include`.
+See [benchmark documentation](docs/benchmark.md) for planning, resume and result
+field definitions. CUDA validation for this override requires `make test-cuda`;
+host checks alone do not establish kernel correctness or performance.

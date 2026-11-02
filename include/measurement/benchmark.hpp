@@ -10,6 +10,7 @@ struct Options {
   Config config;
   std::string preset = "single", prefix = "benchmark";
   std::vector<unsigned> blocks;
+  std::vector<Size> grid_block_counts;
   std::optional<Size> profile_case;
   bool validate = true;
   bool device_info = false, stream_rows = false;
@@ -40,6 +41,17 @@ inline Options options(int argc, char** argv) {
     } else if (key == "--profile-case") {
       const char* a[] = {argv[0], "--seed", argv[i+1]};
       o.profile_case = parse_config(3, a).seed;
+    } else if (key == "--grid-block-counts") {
+      std::string token;
+      std::istringstream list(value);
+      while (std::getline(list, token, ',')) {
+        const char* a[] = {argv[0], "--seed", token.c_str()};
+        Size count = parse_config(3, a).seed;
+        if (!count || std::find(o.grid_block_counts.begin(), o.grid_block_counts.end(), count) != o.grid_block_counts.end())
+          throw std::invalid_argument("grid block counts must be positive and distinct");
+        o.grid_block_counts.push_back(count);
+      }
+      if (o.grid_block_counts.empty() || value.back() == ',') throw std::invalid_argument("empty grid block count");
     } else if (key == "--block-sizes") {
       std::string token;
       std::istringstream list(value);
@@ -60,6 +72,8 @@ inline Options options(int argc, char** argv) {
   o.config = parse_config(static_cast<int>(args.size()), args.data());
   if (o.preset != "full" && o.preset != "smoke" && o.preset != "single")
     throw std::invalid_argument("preset: single, smoke or full");
+  if (multiplier && !o.grid_block_counts.empty())
+    throw std::invalid_argument("grid block counts cannot be combined with SM multipliers");
   if (o.preset != "single" && (positions || multiplier))
     throw std::invalid_argument("matrix preset owns positions and SM multipliers");
   if (o.preset == "full") {
@@ -90,13 +104,16 @@ inline Matrix matrix(const Options& o) {
     const auto ref = m.references.size();
     m.references.push_back(c);
     for (unsigned block : o.blocks)
-    for (Size mult : o.preset == "single" ? std::vector<Size>{c.sm_multiplier} : std::vector<Size>{1,2,4,8,16})
+    for (Size mult : !o.grid_block_counts.empty() ? o.grid_block_counts :
+         o.preset == "single" ? std::vector<Size>{c.sm_multiplier} : std::vector<Size>{1,2,4,8,16})
     for (auto primitive : {BlockPrimitive::custom, BlockPrimitive::cub})
     for (auto storage : {AccumulatorStorage::registers, AccumulatorStorage::shared, AccumulatorStorage::global})
     for (auto layout : {GlobalLayout::thread_major, GlobalLayout::bin_major}) {
       if (storage == AccumulatorStorage::registers && layout == GlobalLayout::bin_major) continue;
       for (auto method : {ReductionMethod::two_kernel, ReductionMethod::cooperative}) {
-        c.block_size = block; c.sm_multiplier = mult;
+        c.block_size = block;
+        if (o.grid_block_counts.empty()) c.sm_multiplier = mult;
+        else c.grid_blocks = mult;
         m.cases.push_back({c, ref, band, primitive, storage, layout, method, false});
       }
     }
@@ -114,8 +131,15 @@ inline Matrix matrix(const Options& o) {
       std::string positions, band, primitive, storage, layout, strategy, extra;
       Config c = o.config;
       if (!(fields >> positions >> band >> primitive >> storage >> layout >> strategy
-                   >> c.block_size >> c.sm_multiplier) || fields >> extra)
+                   >> c.block_size >> c.sm_multiplier))
         throw std::invalid_argument("malformed case plan row");
+      // Older plans have eight fields; the optional ninth is zero for SM mode.
+      fields >> std::ws;
+      if (!fields.eof()) {
+        Size grid;
+        if (!(fields >> grid) || fields >> extra) throw std::invalid_argument("malformed case plan grid");
+        if (grid) c.grid_blocks = grid;
+      }
       const char* a[] = {"plan", "--positions", positions.c_str()};
       // parse positions with the actual q, rather than the parser's default q.
       std::string q = std::to_string(c.qubits);
