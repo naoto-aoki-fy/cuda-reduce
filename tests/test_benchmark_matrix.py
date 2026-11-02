@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('matrix', ROOT/'tools/benchmark_matrix.py')
@@ -18,6 +20,74 @@ spec.loader.exec_module(bm)
 class MatrixTests(unittest.TestCase):
     def config(self):
         return dict(version=1, q=[12,16], k=[1,3], candidates=dict(methods=['segmented']))
+
+    def test_shortest_first(self):
+        config = dict(self.config(), q=[16,12], k=[3,1],
+                      candidates=dict(methods=['custom','cub','segmented'],
+                                      storage=['global','shared'], block_sizes=[512,128],
+                                      sm_multipliers=[8,1]))
+        settings, _, cases = bm.plan(config)
+        original = copy.deepcopy(cases)
+        order = bm.execution_order(cases, settings)
+        self.assertEqual(cases, original)
+        self.assertEqual(order, bm.execution_order(cases, settings))
+        self.assertCountEqual([c['case_key'] for c in cases], [c['case_key'] for c in order])
+        costs = [(c['workload']['q'], bm.scheduling_cost(c, settings)) for c in order]
+        self.assertEqual(costs, sorted(costs))
+        self.assertNotEqual(order, cases)
+        # Stable tie breaking follows the unchanged plan index.
+        indices = {c['case_key']: i for i, c in enumerate(cases)}
+        for a, b in zip(order, order[1:]):
+            if (a['workload']['q'], bm.scheduling_cost(a, settings)) == (b['workload']['q'], bm.scheduling_cost(b, settings)):
+                self.assertLess(indices[a['case_key']], indices[b['case_key']])
+
+    def test_scheduled_budget_resume(self):
+        # Deterministic host clock: allow q=12 then exhaust the group budget.
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            config = dict(self.config(), q=[16,12], k=[3,1], positions=dict(patterns=['low']),
+                          measurement=dict(run_budget_seconds=1))
+            conf = tmp/'config.json'
+            conf.write_text(json.dumps(config))
+            binary = tmp/'fake'
+            binary.write_text('''#!/usr/bin/env python3
+import sys,json,pathlib
+a=dict(zip(sys.argv[1::2],sys.argv[2::2]))
+if '--device-info' in a:
+ print(json.dumps(dict(SM_count=1,initial_free_device_bytes=10**10,L2_bytes=1000)))
+else:
+ for i,line in enumerate(pathlib.Path(a['--case-plan']).read_text().splitlines()):
+  print('MEASUREMENT_ROW '+json.dumps(dict(case_id=i,status='success',timing_status='success',workspace_bytes=10,reason='')))
+''')
+            binary.chmod(0o755)
+            args = SimpleNamespace(results=str(tmp/'r'), matrix_config=str(conf), binary=str(binary),
+                                   recover=False, dry_run=False, resume=False)
+            settings, _, cases = bm.plan(config)
+            expected = bm.execution_order(cases, settings)
+            args.dry_run = True
+            self.assertEqual(bm.run(args), 0)
+            preview = json.loads((tmp/'r.plan.json').read_text())['cases']
+            self.assertEqual([c['case_key'] for c in preview], [c['case_key'] for c in cases])
+            self.assertEqual([c['case_key'] for c in sorted(preview, key=lambda c: c['scheduled_index'])],
+                             [c['case_key'] for c in expected])
+            self.assertEqual([c['case_id'] for c in preview], list(range(4)))
+            args.dry_run = False
+            with patch.object(bm.time, 'monotonic', side_effect=[0,0,0,2]):
+                self.assertEqual(bm.run(args), 0)
+            _, rows, _ = bm.read_journal(tmp/'r.journal.jsonl')
+            self.assertEqual([r['case_key'] for r in rows.values()], [c['case_key'] for c in expected[:2]])
+            saved = json.loads((tmp/'r.json').read_text())['results']
+            self.assertEqual(sum(r['status']=='not_run' for r in saved), 2)
+            self.assertTrue(all(r['execution_index'] is None for r in saved if r['status']=='not_run'))
+            args.resume = True
+            with patch.object(bm.time, 'monotonic', return_value=0):
+                self.assertEqual(bm.run(args), 0)
+            _, rows, _ = bm.read_journal(tmp/'r.journal.jsonl')
+            self.assertEqual([r['case_key'] for r in rows.values()], [c['case_key'] for c in expected])
+            self.assertEqual([r['execution_index'] for r in rows.values()], list(range(4)))
+            for index, case in enumerate(cases):
+                self.assertEqual(rows[case['case_key']]['case_id'], index)
+            self.assertEqual([r['scheduled_index'] for r in rows.values()], list(range(4)))
 
     def test_stage_counts(self):
         c = json.loads((ROOT/'configs/benchmark-full-pilot.json').read_text())

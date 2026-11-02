@@ -185,15 +185,16 @@ in the profile manifest and never replaced with zeros.
 
 ```sh
 make profile PROFILE_ARGS='--case 3 --output build/profile-smoke -- --preset smoke --qubits 10'
-# Same case ordering/input settings as the desired full matrix:
+# Same case IDs/input settings as the desired full matrix:
 make profile PROFILE_ARGS='--case 3 --output build/profile-full -- --preset full'
 ```
 
-Case IDs are zero-based and follow the loops described above: reference band,
+Case IDs are zero-based plan indices and follow the loops described above: reference band,
 block-size list order, multiplier, primitive (custom then CUB), storage
 (registers, shared, global) and layout.
 With defaults, case 3 is custom two-kernel global thread-major at multiplier 1;
-the segmented row follows all custom tuning rows for that reference.
+the segmented ID follows all custom tuning IDs for that reference. Execution is
+scheduled independently, so result rows need not arrive in case-ID order.
 Choose a supported row from a normal result file. The script retains metric
 discovery, version, command, binary hash, per-kernel metrics.csv, ncu report,
 application output and profile manifest. The profiler starts disabled; a CUDA profiler API range encloses only the selected
@@ -226,8 +227,8 @@ unverified. No performance data has been collected here.
 
 ## Opt-in version 1 benchmark plans
 
-The commands above keep their tuning defaults and relative ordering of remaining
-cases. Case IDs change after removal of the former alternative strategy; select
+The commands above keep their tuning defaults and planned case IDs. Case IDs
+changed after removal of the former alternative strategy; select
 profiling IDs from new results. Existing result files remain historical evidence;
 start a new result prefix when an old journal fails the resume fingerprint check. Only
 `--matrix-config` selects the new Python standard-library planner and execution
@@ -329,10 +330,12 @@ For shortlists use `candidates.include` instead of Cartesian filters:
 There are no built-in winners. The shortlist in the example Stage B/C/D files
 is illustrative; edit it based on separately validated Stage A results. Included
 candidates specify all applicable tuning fields. Measurement defaults are seed
-20261031, scheduling seed 20261101, 1 repetition, 3 warmups, 65536 host chunk
+20261031, legacy scheduling seed 20261101, 1 repetition, 3 warmups, 65536 host chunk
 elements, full validation, a 512 MiB memory reserve, unlimited workspace and no
 budgets. Each measurement key can also be overridden on the command line using
 hyphens, for example `--repetitions 9 --case-budget-ms 1000`.
+`scheduling_seed` remains accepted for configuration compatibility; the deterministic
+shortest-first scheduler does not use it.
 
 ## Independent benchmark stages
 
@@ -351,10 +354,49 @@ potentially infeasible configurations so the dataset retains rejection rows.
 
 Each q has one child process with one immutable `(q,seed)` input reused by all
 pending candidates and one traversal for all required CPU references. Candidates
-are shuffled within q using scheduling_seed, while q groups follow the plan's
-order. The journal records actual completion order. Separate seeds control
-input generation, position generation and scheduling. Resume initializes the
-same state again for each q with remaining work.
+execute in estimated shortest-first order within each q, and smaller q groups
+execute first regardless of their configuration order. Resume skips completed
+cases, preserves the relative schedule of pending cases, and initializes the
+same state again for each q with remaining work. Input and position generation
+retain their independent seeds.
+
+The same heuristic schedules the C++ `single`, `smoke`, `full`, and `full-k1-6`
+presets. It estimates relative work units, not milliseconds, without calibration:
+
+- Let `N=2^q`, `B=2^k`, and `T=128 * sm_multiplier * block_size`. The fixed
+  128-SM proxy keeps planning independent of the GPU and its current free memory.
+- For custom/CUB block reductions, cost per invocation is
+  `N*(16+2*k+s) + T*B*(s+8*p) + 16*128*sm_multiplier*B`, where storage weight
+  `s` is 16 for global, 4 for shared, and 1 for registers; `p` is 1 for custom
+  and 1.1 for CUB. This models input reads/bit extraction, accumulator traffic,
+  per-bin block reductions and second-stage partials.
+- For segmented reduction, cost is `N*(24+4*k) + 16*B`, allowing for virtual
+  gather addressing and strided input reads. Both costs are multiplied by
+  `warmups+repetitions`. Ties retain original plan order.
+
+These weights are rough assumptions, not measured backend rankings. Occupancy,
+cache effects, actual SM count, position-dependent coalescing, resource rejections,
+allocation and CPU validation can change wall-clock order. Setup/reference work
+still precedes execution and may dominate a short run. Timing, validation,
+register audits, case coverage and allocation lifetimes are unchanged. Each
+two-kernel reduction still executes its stages together; no cross-case baseline
+dependency exists in the current driver. Python supplies an already scheduled
+case plan, which the C++ child consumes in the supplied order.
+
+Original case IDs, workload/candidate hashes, and `--profile-case` selection are
+unchanged by scheduling. Additive JSON/CSV fields distinguish the orders:
+`case_id` is the plan index, `scheduled_index` is the zero-based scheduled position,
+and `execution_index` counts actual case attempts (null for unattempted rows and
+Python preflight rejections). C++ counts within one invocation; Python counts
+across child processes and resumed attempts in the journal. A retry receives a
+new execution index; the journal retains earlier attempts while exports retain
+the latest row per case. `estimated_cost` records the heuristic work units and
+metadata records `scheduling=estimated_shortest_first_v1` (C++ children report
+`planner_order`). Dry-run cases remain in plan order with explicit scheduled
+indices. Journal record order includes preflight rejections as well as child
+results. Exports after recovery may follow journal order; use the explicit fields
+to reconstruct planned or actual execution order. Existing fingerprints reject
+resuming journals from an older planner/build; use a new result prefix.
 
 The planner first queries actual GPU properties, free memory and build metadata
 without allocating a state. Each candidate is checked against input generation

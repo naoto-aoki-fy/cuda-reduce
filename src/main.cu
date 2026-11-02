@@ -186,6 +186,7 @@ int main(int argc, char** argv) {
     const auto run_start = std::chrono::steady_clock::now();
     const auto o = options(argc, argv);
     const auto m = matrix(o);
+    const auto order = execution_order(m, o);
     if (o.profile_case && *o.profile_case >= m.cases.size()) throw std::invalid_argument("profile case outside matrix");
     Fields metadata{{"build", MEASUREMENT_BUILD_INFO}, {"cub", json_quote(cub_version_description())},
       {"input_generation", json_quote("PHILOX4_32_10; PSEUDO_DEFAULT; offset=0; uniform doubles (0,1]; 2^20 amplitudes/chunk")},
@@ -238,14 +239,20 @@ int main(int argc, char** argv) {
       catch (const std::exception& e) { startup = Status::failure; startup_reason = e.what(); }
     if (o.device_info) throw std::runtime_error("device query failed: " + startup_reason);
     metadata["startup_status"] = json_quote(status_name(startup));
+    metadata["scheduling"] = json_quote(o.case_plan.empty() ? "estimated_shortest_first_v1" : "planner_order");
     metadata["startup_reason"] = json_quote(startup_reason);
     Writer writer(o.prefix, metadata);
     std::map<std::string, Size> counts{{"success",0}, {"unsupported",0}, {"failure",0}, {"not_run",0}};
     bool failed = startup == Status::failure;
     bool poisoned = false;
-    for (Size id = 0; id < m.cases.size(); ++id) {
+    Size execution_index = 0;
+    for (Size rank = 0; rank < order.size(); ++rank) {
+      const auto id = order[rank];
       const auto& x = m.cases[id];
       Fields row = row_template(x, id, o);
+      row["scheduled_index"] = number(rank);
+      row["estimated_cost"] = number(scheduling_cost(x));
+      row["execution_index"] = "null";
       // CSV rows carry identical run metadata as JSON's metadata object.
       for (const auto& p : metadata) row["run_" + p.first] = p.second;
       Status status = Status::not_run;
@@ -260,6 +267,7 @@ int main(int argc, char** argv) {
         row["timing_status"] = json_quote(status_name(status));
       } else if (poisoned) row["reason"] = json_quote("not attempted after unexpected execution error");
       else try {
+        row["execution_index"] = number(execution_index++);
         Size workspace = 0;
         if (x.segmented) workspace = segmented_workspace_bytes(x.c);
         else {

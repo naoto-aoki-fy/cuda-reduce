@@ -220,8 +220,28 @@ def plan(config, overrides=None):
             cid = identity(c)
             cases.append(dict(workload=w, candidate=c, candidate_id=cid,
                               case_key=identity([w['workload_id'], cid])))
-    # Shuffle inside each state group at execution, keeping state reuse.
+    # Keep plan order and identities independent of execution scheduling.
     return settings, list(workloads.values()), cases
+
+
+def scheduling_cost(case, settings):
+    """Relative work units; mirrored by scheduling_cost in benchmark.hpp."""
+    w, c = case['workload'], case['candidate']
+    n, k, bins = w['N'], w['k'], w['bins']
+    if c['method'] == 'segmented':
+        work = n * (24 + 4*k) + 16*bins
+    else:
+        threads = 128 * c['sm_multiplier'] * c['block_size']
+        storage = {'global': 16, 'shared': 4, 'registers': 1}[c['storage']]
+        primitive = 1.1 if c['method'] == 'cub' else 1
+        work = (n * (16 + 2*k + storage) + threads*bins*(storage + 8*primitive)
+                + 16*128*c['sm_multiplier']*bins)
+    return work * (settings['warmups'] + settings['repetitions'])
+
+
+def execution_order(cases, settings):
+    # Stable ties retain plan order. q grouping retains one generated state per q.
+    return sorted(cases, key=lambda c: (c['workload']['q'], scheduling_cost(c, settings)))
 
 
 def estimate(case, device, settings):
@@ -319,7 +339,7 @@ def base_row(case, settings, run_id, index):
                 strategy=c.get('strategy'), storage=c.get('storage'), layout=c.get('layout'),
                 block_size=c.get('block_size'), sm_multiplier=c.get('sm_multiplier'),
                 repetitions=settings['repetitions'], warmups=settings['warmups'], chunk_elements=settings['chunk_elements'],
-                status='not_run', reason='', timing_status='not_run', timing_mode='single_invocation',
+                status='not_run', reason='', timing_status='not_run', timing_mode='single_invocation', execution_index=None,
                 raw_elapsed_ms=[], completed_repetitions=0, validation_status='skipped' if settings['validation']=='skip' else 'not_run',
                 validation_reason='', absolute_tolerance=1e-12, relative_tolerance=1e-11,
                 mean_ms=None, median_ms=None, min_ms=None, max_ms=None, sample_stddev_ms=None,
@@ -368,11 +388,16 @@ def run(args):
     config = json.loads(Path(args.matrix_config).read_text())
     overrides = {k: getattr(args, k) for k in DEFAULTS if getattr(args, k, None) is not None}
     settings, workloads, cases = plan(config, overrides)
+    scheduled = execution_order(cases, settings)
+    ranks = {c['case_key']: i for i, c in enumerate(scheduled)}
     prefix.parent.mkdir(parents=True, exist_ok=True)
     if args.dry_run:
         output = dict(version=1, workload_count=len(workloads), candidate_count=len(cases),
                       distinct_candidates=len({c['candidate_id'] for c in cases}), settings=settings,
-                      cases=[dict(c, **estimate(c, None, settings)) for c in cases])
+                      scheduling='estimated_shortest_first_v1',
+                      cases=[dict(c, case_id=i, scheduled_index=ranks[c['case_key']],
+                                  estimated_cost=scheduling_cost(c, settings),
+                                  **estimate(c, None, settings)) for i, c in enumerate(cases)])
         atomic_json(Path(str(prefix)+'.plan.json'), output)
         print(f"workloads={len(workloads)} candidates={len(cases)}; {prefix}.plan.json")
         return 0
@@ -400,6 +425,7 @@ def run(args):
         header = dict(type='header', version=1, fingerprint=fingerprint,
                       metadata=dict(device, benchmark_run_id=str(uuid.uuid4()), settings=settings,
                                     configuration=config, workload_count=len(workloads), candidate_count=len(cases),
+                                    scheduling='estimated_shortest_first_v1',
                                     startup_status='success', startup_reason=''))
         with journal.open('x') as f:
             append_record(f, header)
@@ -407,21 +433,23 @@ def run(args):
     index = {c['case_key']: i for i, c in enumerate(cases)}
     groups = collections.defaultdict(list)
     started = time.monotonic()
-    for case in cases:
+    for case in scheduled:
         old = rows.get(case['case_key'])
         if old and completed(old):
             continue
         groups[case['workload']['q']].append(case)
     with journal.open('a') as progress:
+        next_execution = 1 + max((r.get('execution_index') for r in rows.values()
+                                 if r.get('execution_index') is not None), default=-1)
         def record(case, row):
             row.update(case_key=case['case_key'], workload_id=case['workload']['workload_id'],
                        candidate_id=case['candidate_id'], benchmark_run_id=run_id, case_id=index[case['case_key']])
+            row.update(scheduled_index=ranks[case['case_key']], estimated_cost=scheduling_cost(case, settings))
             append_record(progress, dict(type='result', row=row))
             rows[case['case_key']] = row
         for q, pending in groups.items():
             if settings['run_budget_seconds'] and time.monotonic()-started >= settings['run_budget_seconds']:
                 break
-            random.Random(identity([settings['scheduling_seed'], q])).shuffle(pending)
             runnable = []
             for case in pending:
                 resource = estimate(case, device, settings)
@@ -466,6 +494,13 @@ def run(args):
                             base = base_row(case, settings, run_id, index[case['case_key']])
                             base.update(estimate(case, device, settings))
                             base.update({k: v for k, v in row.items() if not k.startswith('run_')})
+                            # Child indices are local to this q/retry. Journal
+                            # indices span attempts, including resumed invocations.
+                            if base['status'] != 'not_run' and row.get('execution_index', 0) is not None:
+                                base['execution_index'] = next_execution
+                                next_execution += 1
+                            else:
+                                base['execution_index'] = None
                             base['preset'] = 'matrix'
                             if base['workspace_bytes'] is not None:
                                 base['resource_feasibility'] = 'feasible' if base['status'] == 'success' else base['status']
@@ -486,7 +521,8 @@ def run(args):
                     raise RuntimeError('benchmark child omitted cases; resume to retry missing cases')
     # Include explicit pending rows in exports, without marking them complete in the journal.
     for case in cases:
-        rows.setdefault(case['case_key'], base_row(case, settings, run_id, index[case['case_key']]))
+        rows.setdefault(case['case_key'], dict(base_row(case, settings, run_id, index[case['case_key']]),
+                        scheduled_index=ranks[case['case_key']], estimated_cost=scheduling_cost(case, settings)))
     rows = {c['case_key']: rows[c['case_key']] for c in cases}
     export_results(prefix, header, rows)
     print(f'Results: {prefix}.json, {prefix}.csv; journal: {journal}')

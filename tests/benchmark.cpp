@@ -12,6 +12,36 @@ int main() {
   std::size_t segmented = 0;
   for (const auto& x : m.cases) segmented += x.segmented;
   assert(segmented == 48);
+  // Scheduling never renumbers the matrix used by --profile-case. Every case
+  // appears exactly once, with ascending estimated work and stable ties.
+  for (const char* preset : {"full", "full-k1-6", "smoke", "single"}) {
+    const char* args[] = {"test", "--preset", preset};
+    auto opts = options(3, const_cast<char**>(args));
+    auto planned = matrix(opts);
+    auto order = execution_order(planned, opts);
+    assert(order == execution_order(planned, opts));
+    auto ids = order;
+    std::sort(ids.begin(), ids.end());
+    for (std::size_t i = 0; i < ids.size(); ++i) assert(ids[i] == i);
+    bool changed = false;
+    for (std::size_t i = 1; i < order.size(); ++i) {
+      const auto a = scheduling_cost(planned.cases[order[i-1]]);
+      const auto b = scheduling_cost(planned.cases[order[i]]);
+      assert(a <= b);
+      if (a == b) assert(order[i-1] < order[i]);
+      changed |= order[i] != i;
+    }
+    assert(changed);
+    auto cheap = planned.cases.front(), costly = cheap;
+    costly.c.qubits += 1;
+    assert(scheduling_cost(cheap) < scheduling_cost(costly));
+    costly = cheap; costly.c.sm_multiplier *= 2;
+    assert(scheduling_cost(cheap) < scheduling_cost(costly));
+    costly = cheap; costly.c.block_size *= 2;
+    assert(scheduling_cost(cheap) < scheduling_cost(costly));
+    costly = cheap; costly.c.positions.push_back(1);
+    assert(scheduling_cost(cheap) < scheduling_cost(costly));
+  }
   assert(m.references.front().positions == std::vector<unsigned>{0});
   assert(m.references.back().positions == contiguous_positions(31,16,"high"));
   // The restricted preset must be exactly the k <= 6 prefix of full, including
@@ -83,6 +113,8 @@ int main() {
   const char* planned[] = {"test", "--case-plan", path.c_str()};
   m = matrix(options(3, const_cast<char**>(planned)));
   assert(m.references.size() == 2 && m.cases.size() == 3);
+  assert(execution_order(m, options(3, const_cast<char**>(planned))) ==
+         (std::vector<std::size_t>{0,1,2}));
   assert(m.cases[0].c.positions != m.cases[1].c.positions);
   assert(m.cases[2].segmented && m.cases[0].reference == m.cases[2].reference);
   // Obsolete strategy values must fail parsing rather than generate launch cases.

@@ -2,6 +2,7 @@
 #include "measurement/core.hpp"
 #include <algorithm>
 #include <fstream>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
 
@@ -145,6 +146,38 @@ inline Matrix matrix(const Options& o) {
       add(c, band);
     }
   return m;
+}
+
+// Relative work units, not milliseconds. Keep in sync with scheduling_cost in
+// tools/benchmark_matrix.py. A fixed 128-SM proxy avoids device calibration.
+inline long double scheduling_cost(const Case& x) {
+  const long double n = x.c.state_size(), bins = x.c.bins();
+  const long double k = x.c.positions.size();
+  long double work;
+  if (x.segmented) {
+    // Virtual gather computes k-bit addresses for each input; strided reads.
+    work = n * (24 + 4 * k) + 16 * bins;
+  } else {
+    const long double threads = 128.L * x.c.sm_multiplier * x.c.block_size;
+    const long double storage = x.storage == AccumulatorStorage::global ? 16 :
+                                x.storage == AccumulatorStorage::shared ? 4 : 1;
+    const long double primitive = x.primitive == BlockPrimitive::cub ? 1.1L : 1;
+    work = n * (16 + 2 * k + storage) +
+           threads * bins * (storage + 8 * primitive) +
+           16.L * 128 * x.c.sm_multiplier * bins;
+  }
+  return work * (static_cast<long double>(x.c.warmups) + x.c.repetitions);
+}
+inline std::vector<std::size_t> execution_order(const Matrix& m, const Options& o) {
+  std::vector<std::size_t> order(m.cases.size());
+  std::iota(order.begin(), order.end(), 0);
+  // Planner rows are already scheduled by Python; their indices are the child
+  // protocol IDs. Never change the matrix itself or profiling case selection.
+  if (o.case_plan.empty())
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+      return scheduling_cost(m.cases[a]) < scheduling_cost(m.cases[b]);
+    });
+  return order;
 }
 
 } // namespace measurement
