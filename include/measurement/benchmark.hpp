@@ -58,11 +58,11 @@ inline Options options(int argc, char** argv) {
     }
   }
   o.config = parse_config(static_cast<int>(args.size()), args.data());
-  if (o.preset != "full" && o.preset != "smoke" && o.preset != "single")
-    throw std::invalid_argument("preset: single, smoke or full");
+  if (o.preset != "full" && o.preset != "full-k1-6" && o.preset != "smoke" && o.preset != "single")
+    throw std::invalid_argument("preset: single, smoke, full or full-k1-6");
   if (o.preset != "single" && (positions || multiplier))
     throw std::invalid_argument("matrix preset owns positions and SM multipliers");
-  if (o.preset == "full") {
+  if (o.preset == "full" || o.preset == "full-k1-6") {
     if (qubits) throw std::invalid_argument("full preset fixes q=31; use smoke for smaller input");
     o.config.qubits = 31;
   }
@@ -140,7 +140,8 @@ inline Matrix matrix(const Options& o) {
   }
   else if (o.preset == "single") add(o.config, "ordered");
   else for (unsigned k = 1;
-            k <= std::min(o.preset == "full" ? max_measurement_qubits : 8u, o.config.qubits); ++k)
+            k <= std::min(o.preset == "full-k1-6" ? 6u :
+                          o.preset == "full" ? max_measurement_qubits : 8u, o.config.qubits); ++k)
     for (const auto& band : {"low", "middle", "high"}) {
       Config c = o.config;
       c.positions = contiguous_positions(c.qubits, k, band);

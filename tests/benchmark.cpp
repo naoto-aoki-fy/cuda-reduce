@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstdio>
 #include <iostream>
+#include <tuple>
 using namespace measurement;
 int main() {
   const char* full[] = {"test", "--preset", "full"};
@@ -13,6 +14,35 @@ int main() {
   assert(segmented == 48);
   assert(m.references.front().positions == std::vector<unsigned>{0});
   assert(m.references.back().positions == contiguous_positions(31,16,"high"));
+  // The restricted preset must be exactly the k <= 6 prefix of full, including
+  // every tuning dimension and all timing/input settings, with or without overrides.
+  for (const char* block_sizes : {"256", "32,64,128,256,512,1024"}) {
+    const char* original[] = {"test", "--preset", "full", "--block-sizes", block_sizes,
+      "--repetitions", "2", "--warmups", "4", "--seed", "42"};
+    const char* restricted[] = {"test", "--preset", "full-k1-6", "--block-sizes", block_sizes,
+      "--repetitions", "2", "--warmups", "4", "--seed", "42"};
+    auto full_matrix = matrix(options(11, const_cast<char**>(original)));
+    auto limited = matrix(options(11, const_cast<char**>(restricted)));
+    auto fields = [](const Config& c) {
+      return std::tie(c.qubits, c.positions, c.block_size, c.sm_multiplier,
+                      c.repetitions, c.warmups, c.seed, c.chunk_elements, c.case_budget_ms);
+    };
+    assert(limited.references.size() == 18);
+    assert(limited.cases.size() == (std::string(block_sizes) == "256" ? 1818 : 10818));
+    std::size_t expected = 0;
+    for (const auto& x : full_matrix.cases) {
+      if (x.c.positions.size() > 6) continue;
+      const auto& y = limited.cases.at(expected++);
+      assert(fields(x.c) == fields(y.c));
+      assert(std::tie(x.reference, x.band, x.primitive, x.storage, x.layout, x.method, x.segmented)
+          == std::tie(y.reference, y.band, y.primitive, y.storage, y.layout, y.method, y.segmented));
+    }
+    assert(expected == limited.cases.size());
+    for (std::size_t i = 0; i < limited.references.size(); ++i) {
+      assert(fields(limited.references[i]) == fields(full_matrix.references[i]));
+      assert(limited.references[i].positions.size() == i / 3 + 1);
+    }
+  }
   const char* blocks[] = {"test", "--preset", "full", "--block-sizes", "128,256,512"};
   assert(matrix(options(5, const_cast<char**>(blocks))).cases.size() == 14448);
   const char* all_blocks[] = {"test", "--preset", "full", "--block-sizes", "32,64,128,256,512,1024"};
@@ -38,10 +68,12 @@ int main() {
   assert(m.references.size() == 1 && m.cases.size() == 21);
   assert(m.references[0].positions == (std::vector<unsigned>{7,1}));
   for (const auto* key : {"--qubits", "--positions", "--sm-multiplier"}) {
-    const char* bad[] = {"test", "--preset", "full", key, "1"};
-    bool rejected = false;
-    try { options(5, const_cast<char**>(bad)); } catch (const std::invalid_argument&) { rejected=true; }
-    assert(rejected);
+    for (const auto* preset : {"full", "full-k1-6"}) {
+      const char* bad[] = {"test", "--preset", preset, key, "1"};
+      bool rejected = false;
+      try { options(5, const_cast<char**>(bad)); } catch (const std::invalid_argument&) { rejected=true; }
+      assert(rejected);
+    }
   }
   // Planner interchange retains ordered positions and deduplicates references.
   const std::string path = "build/host-test-plan.tsv";

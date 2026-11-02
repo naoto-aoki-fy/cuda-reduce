@@ -84,7 +84,7 @@ cuda-evidence:
 	python3 tools/capture_cuda_evidence.py --arch '$(CUDA_ARCH)' --nvcc '$(NVCC)' --flags='$(NVCCFLAGS)'
 
 # Recheck metadata each invocation; only rewrite the header if its content changes.
-.PHONY: FORCE benchmark-smoke benchmark-full profile
+.PHONY: FORCE benchmark-smoke benchmark-full benchmark-full-k1-6 profile
 $(BUILD)/build_info.hpp: export MEASUREMENT_NVCC = $(NVCC)
 $(BUILD)/build_info.hpp: export MEASUREMENT_NVCCFLAGS = $(NVCCFLAGS)
 $(BUILD)/build_info.hpp: export MEASUREMENT_CPPFLAGS = $(CPPFLAGS)
@@ -108,5 +108,9 @@ else
 benchmark-full: cuda
 	./$(BUILD)/measurement_validate --preset full --results $(BENCHMARK_RESULTS) $(BENCHMARK_ARGS)
 endif
+BENCHMARK_K1_6_RESULTS ?= $(BUILD)/full-k1-6/results
+benchmark-full-k1-6: cuda
+	mkdir -p $(dir $(BENCHMARK_K1_6_RESULTS))
+	./$(BUILD)/measurement_validate --preset full-k1-6 --results $(BENCHMARK_K1_6_RESULTS) $(BENCHMARK_ARGS)
 profile: cuda
 	python3 tools/profile_benchmark.py --binary $(BUILD)/measurement_validate $(PROFILE_ARGS)

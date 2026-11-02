@@ -239,3 +239,16 @@ to `build/full.json` and `build/full.csv`. Use
 profiling, reproducible builds and limitations. Step 6 tests were skipped as
 requested; `make host` succeeded and `make cuda` was blocked by missing nvcc.
 No full-size run, GPU validation or timing results are available here.
+
+To run the same full benchmark restricted to k=1,2,3,4,5,6:
+
+```sh
+make benchmark-full-k1-6 BENCHMARK_ARGS='--block-sizes 256 --repetitions 1 --warmups 3'
+```
+
+This uses the `full-k1-6` preset with the same fixed q=31 input, position bands,
+methods, tuning parameters, timing and validation as `full`. It retains all 1818
+requested cases by default, including unsupported ones. Results go to the separate
+directory `build/full-k1-6/` as `results.json` and `results.csv`; override the prefix
+with `BENCHMARK_K1_6_RESULTS=path/to/results`. The original `benchmark-full` target
+and its k=1..16 sweep are unchanged.
