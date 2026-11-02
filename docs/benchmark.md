@@ -32,7 +32,7 @@ make benchmark-smoke BENCHMARK_ARGS='--qubits 10 --warmups 1 --repetitions 2'
 
 Tests are explicit Make targets; the benchmark does not secretly run them.
 `--preset single` (the default) preserves an arbitrary ordered `--positions`
-configuration and one multiplier, running all backends and strategies. For example:
+configuration and one multiplier, running all backends with two-kernel reductions. For example:
 
 ```sh
 ./build/measurement_validate --qubits 10 --positions 7,1 --seed 20261031 --chunk-elements 128 --results build/single
@@ -56,12 +56,12 @@ from 32,64,128,256,512,1024; it defaults to `--block-size` (256). Measured repet
 default to 1 and warmups to 3.
 
 Each of 48 measurement configurations (k=1..16 times three position bands) has,
-for each block size and multiplier, 20 rows: custom/CUB BlockReduce times two
-strategies times five storage/layout choices (registers with layout n/a, shared
+for each block size and multiplier, 10 rows: custom/CUB BlockReduce times
+five storage/layout choices (registers with layout n/a, shared
 with two layouts, global with two layouts). Add one DeviceSegmentedReduce row
 per measurement configuration, independent of custom tuning. The default full
-matrix therefore contains **4848 rows**; three block sizes produce **14448**,
-and all six produce **28848**. The default block size remains 256.
+matrix therefore contains **2448 rows**; three block sizes produce **7248**,
+and all six produce **14448**. The default block size remains 256.
 Here k counts measured qubits, while the state size stays fixed at q=31.
 The smoke preset retains its k=1..min(8,q) sweep. Larger k can exceed shared
 memory or global workspace limits; these requests remain explicit unsupported
@@ -109,7 +109,7 @@ output retention is O(repetitions * bins) for the active variant.
 A controlled nonblocking stream and CUDA events surround each complete
 invocation. Every repetition initializes its own accumulators, reads the state,
 computes norms and bin mapping, and runs both reduction kernels (or the complete
-cooperative/library operation). CUB segmented input is a lazy gather/norm iterator;
+library operation). CUB segmented input is a lazy gather/norm iterator;
 no data-dependent norms or reorder buffers are prepared outside timing.
 Allocation, position upload, input generation, warmups, CPU work and output
 validation transfers are outside event intervals. Per-repetition synchronization
@@ -137,8 +137,7 @@ The sum of all output bins must satisfy the same absolute/relative rule against
 the CPU total norm (sum of compensated reference bins). Maximum absolute error
 and maximum relative error are reported across repetitions, where the latter is
 `max(abs(error) / max(abs(reference), 1e-12))`. Total-norm absolute error is also
-reported. Tolerances are fixed and never widened. Eligible cooperative results
-retain the additional comparison against the matching two-kernel output.
+reported. Tolerances are fixed and never widened.
 
 `--validation skip` explicitly disables CPU reference/validation, records
 `validation_status=skipped` and must not be described as a validated benchmark.
@@ -176,7 +175,7 @@ make cuda-evidence CUDA_ARCH=sm_80 NVCCFLAGS='-O2'
 
 Inspect the retained build.log ptxas spill-load/store messages, resources.txt,
 PTX and SASS per kernel. The manifest binds compiler flags, source and binary
-hashes. Evidence capture does not certify register residency or synchronization.
+hashes. Evidence capture does not certify register residency or atomic-free library execution.
 
 The profiling helper first queries the installed Nsight Compute metric catalog,
 then requests only supported launch-resource, occupancy, DRAM read/write and local load/store
@@ -185,15 +184,15 @@ compiler spill counts. Unavailable tools, counters or permissions are recorded
 in the profile manifest and never replaced with zeros.
 
 ```sh
-make profile PROFILE_ARGS='--case 6 --output build/profile-smoke -- --preset smoke --qubits 10'
+make profile PROFILE_ARGS='--case 3 --output build/profile-smoke -- --preset smoke --qubits 10'
 # Same case ordering/input settings as the desired full matrix:
-make profile PROFILE_ARGS='--case 6 --output build/profile-full -- --preset full'
+make profile PROFILE_ARGS='--case 3 --output build/profile-full -- --preset full'
 ```
 
 Case IDs are zero-based and follow the loops described above: reference band,
 block-size list order, multiplier, primitive (custom then CUB), storage
-(registers, shared, global), layout and strategy (two_kernel, cooperative).
-With defaults, case 6 is custom two-kernel global thread-major at multiplier 1;
+(registers, shared, global) and layout.
+With defaults, case 3 is custom two-kernel global thread-major at multiplier 1;
 the segmented row follows all custom tuning rows for that reference.
 Choose a supported row from a normal result file. The script retains metric
 discovery, version, command, binary hash, per-kernel metrics.csv, ncu report,
@@ -207,9 +206,8 @@ interpreting any report.
 
 ## Atomic policy and actual implementation-environment evidence
 
-No atomic-add exception has been introduced. Cooperative methods remain
-unsupported because no build has certified atomic-free grid synchronization;
-the examined CUDA vendor implementation violates the policy. Register requests
+No atomic-add exception has been introduced. Reductions use same-stream kernel
+ordering between stages and retain the necessary block barriers. Register requests
 remain unsupported until binary/architecture-bound residency evidence exists;
 k>3 additionally exceeds capacity. CUB methods have no version gate and record
 atomic-free audit status as **unverified for the selected build**. The strict
@@ -217,7 +215,7 @@ atomic-free requirement still applies: compatible APIs, passing CPU-reference
 comparisons and performance measurements are separate from implementation
 verification. Review the installed source and generated device code for every
 selected architecture; numerical correctness alone cannot prove absence of
-atomics. See cooperative-sync-audit.md and cub-baselines.md.
+atomics. See [the CUB audit](cub-baselines.md).
 Do not interpret the presence of all requested rows as support for every row.
 
 The expanded infrastructure is host-tested (including preset compatibility,
@@ -228,7 +226,10 @@ unverified. No performance data has been collected here.
 
 ## Opt-in version 1 benchmark plans
 
-The legacy commands above keep their defaults and ordering. Only
+The commands above keep their tuning defaults and relative ordering of remaining
+cases. Case IDs change after removal of the former alternative strategy; select
+profiling IDs from new results. Existing result files remain historical evidence;
+start a new result prefix when an old journal fails the resume fingerprint check. Only
 `--matrix-config` selects the new Python standard-library planner and execution
 wrapper. Basic planning and journal recovery need Python 3 on a POSIX system,
 and do not build CUDA or query a device:
@@ -309,8 +310,11 @@ labels do not affect identity.
 Candidate filters expand only the selected dimensions. `cub` means CUB
 BlockReduce; `segmented` means CUB DeviceSegmentedReduce and generates one
 candidate per workload regardless of other dimensions. Registers have no layout.
-Optional `registers` storage and `cooperative` strategy remain explicitly
-unsupported under the current audits. No policy gate is relaxed.
+Optional `registers` storage remains explicitly unsupported under the current
+residency audit. Only `two_kernel` is accepted in `strategies` and included
+candidates' `strategy` fields; other strategy values are configuration errors.
+The output `strategy` field remains `two_kernel` (null for segmented) for schema
+compatibility. No policy gate is relaxed.
 
 For shortlists use `candidates.include` instead of Cartesian filters:
 

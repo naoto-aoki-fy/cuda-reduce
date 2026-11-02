@@ -60,6 +60,22 @@ class MatrixTests(unittest.TestCase):
             with self.subTest(patch=patch), self.assertRaises(ValueError):
                 bm.plan(c)
 
+    def test_only_two_kernel_strategy(self):
+        # Reject obsolete strategies in both planner entry points.
+        for method in ['custom', 'cub']:
+            for strategy in ['cooperative', 'typo']:
+                for candidates in [dict(methods=[method], strategies=[strategy]),
+                                   dict(include=[dict(method=method, storage='global',
+                                        layout='thread_major', block_size=256,
+                                        sm_multiplier=8, strategy=strategy)])]:
+                    with self.subTest(candidates=candidates), self.assertRaises(ValueError):
+                        bm.plan(dict(self.config(), candidates=candidates))
+        _, _, cases = bm.plan(dict(self.config(), candidates=dict(methods=['custom','cub','segmented'])))
+        for case in cases:
+            candidate = case['candidate']
+            self.assertEqual(candidate.get('strategy'),
+                             None if candidate['method'] == 'segmented' else 'two_kernel')
+
     def test_filters_and_ids(self):
         c = self.config()
         c['candidates'] = dict(methods=['custom','segmented'], block_sizes=[128], sm_multipliers=[2],

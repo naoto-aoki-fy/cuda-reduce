@@ -138,7 +138,7 @@ Fields row_template(const Case& x, Size id, const Options& o) {
   row["seed"] = number(x.c.seed); row["chunk_elements"] = number(x.c.chunk_elements);
   row["repetitions"] = number(x.c.repetitions); row["warmups"] = number(x.c.warmups);
   row["method"] = json_quote(x.segmented ? "CUB DeviceSegmentedReduce" : x.primitive == BlockPrimitive::cub ? "CUB BlockReduce" : "custom");
-  row["strategy"] = x.segmented ? "null" : json_quote(x.method == ReductionMethod::cooperative ? "cooperative" : "two_kernel");
+  row["strategy"] = x.segmented ? "null" : json_quote("two_kernel");
   row["storage"] = x.segmented ? "null" : json_quote(x.storage == AccumulatorStorage::registers ? "registers" : x.storage == AccumulatorStorage::shared ? "shared" : "global");
   row["layout"] = x.segmented || x.storage == AccumulatorStorage::registers ? "null" : json_quote(x.layout == GlobalLayout::thread_major ? "thread_major" : "bin_major");
   row["block_size"] = x.segmented ? "null" : number(x.c.block_size);
@@ -241,7 +241,6 @@ int main(int argc, char** argv) {
     metadata["startup_reason"] = json_quote(startup_reason);
     Writer writer(o.prefix, metadata);
     std::map<std::string, Size> counts{{"success",0}, {"unsupported",0}, {"failure",0}, {"not_run",0}};
-    std::map<std::string, std::vector<double>> matching;
     bool failed = startup == Status::failure;
     bool poisoned = false;
     for (Size id = 0; id < m.cases.size(); ++id) {
@@ -264,10 +263,10 @@ int main(int argc, char** argv) {
         Size workspace = 0;
         if (x.segmented) workspace = segmented_workspace_bytes(x.c);
         else {
-          auto r = reduction_resources(x.c, x.storage, x.method, x.primitive);
+          auto r = reduction_resources(x.c, x.storage, x.primitive);
           row["resources"] = json_quote(resource_description(r));
           row["blocks"] = number(r.blocks); kernel(row, r.first, 1);
-          if (!r.cooperative) kernel(row, r.second, 2);
+          kernel(row, r.second, 2);
           workspace = checked_add(allocation_bytes(checked_mul(r.blocks, x.c.bins()), sizeof(double)),
             checked_add(allocation_bytes(x.c.bins(), sizeof(double)), allocation_bytes(x.c.positions.size(), sizeof(unsigned))));
           if (x.storage == AccumulatorStorage::global) workspace = checked_add(workspace,
@@ -289,7 +288,7 @@ int main(int argc, char** argv) {
           } else result = reduction.run(*state, output, stream->value);
         };
         if (x.segmented) { SegmentedReduction reduction(x.c); execute(reduction); }
-        else { GlobalReduction reduction(x.c, x.layout, x.storage, x.method, x.primitive); execute(reduction); }
+        else { GlobalReduction reduction(x.c, x.layout, x.storage, x.primitive); execute(reduction); }
         status = result.status;
         row["reason"] = json_quote(result.reason);
         if (!o.profile_case) row["timing_status"] = json_quote(status_name(status));
@@ -325,18 +324,6 @@ int main(int argc, char** argv) {
           if (!ok) {
             status = Status::failure; row["validation_status"] = json_quote("failure");
             row["validation_reason"] = json_quote("at least one measured repetition failed bin/total norm validation");
-          }
-        }
-        if (status == Status::success && !x.segmented && !o.profile_case) {
-          std::string key = number(x.reference) + ':' + number(x.c.block_size) + ':' + number(x.c.sm_multiplier) +
-            ':' + number(int(x.primitive)) + ':' + number(int(x.storage)) + ':' + number(int(x.layout));
-          if (x.method == ReductionMethod::two_kernel) matching[key] = output;
-          else {
-            auto it = matching.find(key);
-            bool ok = it != matching.end() && it->second.size() == output.size();
-            if (ok) for (std::size_t b = 0; b < output.size(); ++b)
-              ok &= std::isfinite(output[b]) && std::abs(output[b] - it->second[b]) <= kAbsoluteTolerance + kRelativeTolerance * std::abs(it->second[b]);
-            if (!ok) { status = Status::failure; row["reason"] = json_quote("matching two-kernel output missing or mismatched"); }
           }
         }
         if (result.status == Status::failure) poisoned = true;

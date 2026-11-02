@@ -7,8 +7,7 @@ The installed CUDA/CCCL toolchain supplies CUB (or headers selected through
 and other releases can compile and execute both baselines when the required
 public APIs are compatible. API incompatibilities fail compilation directly;
 there is no replacement with custom kernels or silent version-based test skip.
-Resource limits, register residency and cooperative synchronization gates remain
-independent and unchanged.
+Resource limits and register residency gates remain independent.
 
 Runtime diagnostics and benchmark metadata report actual CUB, CCCL when its
 version header/macro is available, CUDA header and compiler versions. Existing
@@ -36,37 +35,34 @@ the installed DeviceSegmentedReduce policy is left to CUB.
 
 ## A: matched BlockReduce pipeline
 
-Select `GlobalReduction(config, layout, storage, method, BlockPrimitive::cub)`.
+Select `GlobalReduction(config, layout, storage, BlockPrimitive::cub)`.
 The default primitive remains custom. Accumulation/traversal bodies are shared
 source with a compile-time reduction policy: S=0 instantiates only the custom
 shuffle/barrier primitive; S=32/64/128/256/512/1024 instantiates only
 `cub::BlockReduce<double,S,cub::BLOCK_REDUCE_WARP_REDUCTIONS>::Sum`.
 No measurement count or bin count is a template argument.
 
-For each storage/layout/method, input norm calculation, ordered runtime positions,
+For each storage/layout, input norm calculation, ordered runtime positions,
 per-thread accumulators, layouts, G=SM_count*sm_multiplier, partial layout and
 final bin ownership match the custom implementation exactly. Global/shared
 storage preserves both layouts; the eight named register scalars have layout n/a
 and runtime k=1..3 capacity. There is no substitution or size adjustment.
 Both reduction stages use CUB. Every bin reduction ends with a block barrier
-before temporary storage can be reused. Cooperative instantiations retain the
-mandatory grid.sync between the two stages.
+before temporary storage can be reused. The two kernels launch on the same
+stream, whose execution order supplies the dependency between stages.
 
 Resource inspection selects the actual CUB kernel instantiation for the requested
-S, storage and method: static shared bytes, registers, local bytes, maximum block
+S and storage: static shared bytes, registers, local bytes, maximum block
 size and occupancy come from that kernel, including the final stage. Shared
 accumulators still require 8*S*B dynamic bytes, in addition to the queried CUB
 static storage; no custom scratch-size assumption is used. Dynamic opt-in and
-cooperative residency are recomputed from these values. Workspace is otherwise
+per-kernel occupancy are recomputed from these values. Workspace is otherwise
 8*T*B global accumulator bytes when applicable, 8*G*B partial bytes, 8*B output
 bytes and k*sizeof(unsigned) position bytes; T=G*S.
 
 Register qualification remains independently unverified for these CUB-containing
-kernels, including the cooperative combined kernel. All register execution is
-gated; k>3 reports capacity exceeded. Cooperative execution is also gated by the
-strict synchronization atomic policy, as documented in
-[the grid synchronization audit](cooperative-sync-audit.md). Eligibility queries
-may reject device/resource limits before these policy gates.
+kernels. All register execution is gated; k>3 reports capacity exceeded.
+Eligibility queries may reject device/resource limits before the residency gate.
 
 ## B: DeviceSegmentedReduce
 
@@ -129,16 +125,15 @@ All file paths here are relative to the linked upstream `cub/cub/` tree.
   `warp/specializations/warp_reduce_shfl.cuh:329-362` implements double addition
   with shuffle and add instructions. Neither selected baseline's reduction path
   performs atomic addition or CAS accumulation. The nondeterministic atomic
-  BlockReduce algorithm is never selected. Cooperative grid.sync is excluded
-  from execution by the independent policy gate.
+  BlockReduce algorithm is never selected.
 
 This establishes upstream 2.8.2 **source** compatibility and atomic policy for the
 inspected algorithms; it is not a successful CUDA build or device-code audit,
 and does not verify the selected build.
-`make cuda-evidence CUDA_ARCH=sm_XX` retains CUB and combined-kernel preprocessing,
+`make cuda-evidence CUDA_ARCH=sm_XX` retains CUB preprocessing,
 compiler/ptxas output, resource usage, PTX/SASS and source/binary hashes for a
 future actual build. Audit every selected kernel and called function, including
-all eight register accumulators, before changing residency/synchronization gates.
+all eight register accumulators, before changing the register residency gate.
 
 ## Results and unsupported cases
 
@@ -152,7 +147,6 @@ all eight register accumulators, before changing residency/synchronization gates
 | Any installed CUB, including 3.3.4 | No version rejection; API compatibility, GPU correctness and atomic-free execution unverified here |
 | CUB registers, k=1..3 | Unsupported: actual CUB kernel residency unverified |
 | CUB registers, k=4..8 | Unsupported: eight-double capacity |
-| CUB cooperative, every backend/layout | Unsupported: strict grid.sync atomic-policy gate, possibly earlier resource rejection |
 | CUB shared or launch resource excess | Unsupported with actual requested/kernel/device limit diagnostics |
 | Signed iterator endpoint >INT64_MAX | Unsupported; no narrowing or N adjustment |
 

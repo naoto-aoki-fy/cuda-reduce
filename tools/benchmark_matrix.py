@@ -105,7 +105,7 @@ def positions(q, k, spec):
 METHODS = ['custom', 'cub', 'segmented']
 STORAGE = ['shared', 'global', 'registers']
 LAYOUTS = ['thread_major', 'bin_major']
-STRATEGIES = ['two_kernel', 'cooperative']
+STRATEGIES = ['two_kernel']
 BLOCK_SIZES = [32, 64, 128, 256, 512, 1024]
 
 
@@ -231,8 +231,6 @@ def estimate(case, device, settings):
     workspace = grid = threads = accumulator = None
     if c.get('storage') == 'registers':
         reason = 'register capacity exceeded' if k > 3 else 'register residency audit unverified'
-    elif c.get('strategy') == 'cooperative':
-        reason = 'cooperative synchronization strict atomic policy unverified'
     lower_bound = 8*b + 1 if c['method']=='segmented' else (
         (8*c['sm_multiplier']*c['block_size']*b if c['storage']=='global' else 0)
         + 8*c['sm_multiplier']*b + 8*b + 4*k)

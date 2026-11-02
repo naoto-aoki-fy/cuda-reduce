@@ -77,7 +77,6 @@ struct Case {
   BlockPrimitive primitive;
   AccumulatorStorage storage;
   GlobalLayout layout;
-  ReductionMethod method;
   bool segmented;
 };
 struct Matrix {
@@ -95,14 +94,12 @@ inline Matrix matrix(const Options& o) {
     for (auto storage : {AccumulatorStorage::registers, AccumulatorStorage::shared, AccumulatorStorage::global})
     for (auto layout : {GlobalLayout::thread_major, GlobalLayout::bin_major}) {
       if (storage == AccumulatorStorage::registers && layout == GlobalLayout::bin_major) continue;
-      for (auto method : {ReductionMethod::two_kernel, ReductionMethod::cooperative}) {
-        c.block_size = block; c.sm_multiplier = mult;
-        m.cases.push_back({c, ref, band, primitive, storage, layout, method, false});
-      }
+      c.block_size = block; c.sm_multiplier = mult;
+      m.cases.push_back({c, ref, band, primitive, storage, layout, false});
     }
     // No repetition across irrelevant custom tuning dimensions.
     m.cases.push_back({m.references[ref], ref, band, BlockPrimitive::cub,
-      AccumulatorStorage::global, GlobalLayout::thread_major, ReductionMethod::two_kernel, true});
+      AccumulatorStorage::global, GlobalLayout::thread_major, true});
   };
   if (!o.case_plan.empty()) {
     // Internal, validated planner interchange: one q/seed per process.
@@ -127,14 +124,14 @@ inline Matrix matrix(const Options& o) {
       if (storage != "global" && storage != "shared" && storage != "registers")
         throw std::invalid_argument("invalid plan storage");
       if (layout != "thread_major" && layout != "bin_major") throw std::invalid_argument("invalid plan layout");
-      if (strategy != "two_kernel" && strategy != "cooperative") throw std::invalid_argument("invalid plan strategy");
+      if (strategy != "two_kernel") throw std::invalid_argument("invalid plan strategy");
       std::size_t ref = 0;
       while (ref < m.references.size() && m.references[ref].positions != c.positions) ++ref;
       if (ref == m.references.size()) m.references.push_back(c);
       m.cases.push_back({c, ref, band, primitive == "custom" ? BlockPrimitive::custom : BlockPrimitive::cub,
         storage == "global" ? AccumulatorStorage::global : storage == "shared" ? AccumulatorStorage::shared : AccumulatorStorage::registers,
         layout == "thread_major" ? GlobalLayout::thread_major : GlobalLayout::bin_major,
-        strategy == "two_kernel" ? ReductionMethod::two_kernel : ReductionMethod::cooperative, primitive == "segmented"});
+        primitive == "segmented"});
     }
     if (m.cases.empty()) throw std::invalid_argument("empty case plan");
   }

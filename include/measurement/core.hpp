@@ -16,7 +16,6 @@ std::size_t allocation_bytes(Size elements, Size element_bytes);
 enum class GlobalLayout { thread_major, bin_major };
 enum class AccumulatorStorage { global, shared, registers };
 enum class BlockPrimitive { custom, cub };
-enum class ReductionMethod { two_kernel, cooperative };
 struct Config {
   unsigned qubits = 10;
   std::vector<unsigned> positions{0};

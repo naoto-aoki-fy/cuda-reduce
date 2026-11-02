@@ -8,7 +8,7 @@ int main() {
   const char* full[] = {"test", "--preset", "full"};
   auto o = options(3, const_cast<char**>(full));
   auto m = matrix(o);
-  assert(o.config.qubits == 31 && m.references.size() == 48 && m.cases.size() == 4848);
+  assert(o.config.qubits == 31 && m.references.size() == 48 && m.cases.size() == 2448);
   std::size_t segmented = 0;
   for (const auto& x : m.cases) segmented += x.segmented;
   assert(segmented == 48);
@@ -28,14 +28,14 @@ int main() {
                       c.repetitions, c.warmups, c.seed, c.chunk_elements, c.case_budget_ms);
     };
     assert(limited.references.size() == 18);
-    assert(limited.cases.size() == (std::string(block_sizes) == "256" ? 1818 : 10818));
+    assert(limited.cases.size() == (std::string(block_sizes) == "256" ? 918 : 5418));
     std::size_t expected = 0;
     for (const auto& x : full_matrix.cases) {
       if (x.c.positions.size() > 6) continue;
       const auto& y = limited.cases.at(expected++);
       assert(fields(x.c) == fields(y.c));
-      assert(std::tie(x.reference, x.band, x.primitive, x.storage, x.layout, x.method, x.segmented)
-          == std::tie(y.reference, y.band, y.primitive, y.storage, y.layout, y.method, y.segmented));
+      assert(std::tie(x.reference, x.band, x.primitive, x.storage, x.layout, x.segmented)
+          == std::tie(y.reference, y.band, y.primitive, y.storage, y.layout, y.segmented));
     }
     assert(expected == limited.cases.size());
     for (std::size_t i = 0; i < limited.references.size(); ++i) {
@@ -44,10 +44,10 @@ int main() {
     }
   }
   const char* blocks[] = {"test", "--preset", "full", "--block-sizes", "128,256,512"};
-  assert(matrix(options(5, const_cast<char**>(blocks))).cases.size() == 14448);
+  assert(matrix(options(5, const_cast<char**>(blocks))).cases.size() == 7248);
   const char* all_blocks[] = {"test", "--preset", "full", "--block-sizes", "32,64,128,256,512,1024"};
   auto all = matrix(options(5, const_cast<char**>(all_blocks)));
-  assert(all.cases.size() == 28848 && all.references.size() == 48);
+  assert(all.cases.size() == 14448 && all.references.size() == 48);
   std::size_t baseline_count = 0;
   for (const auto& x : all.cases) baseline_count += x.segmented;
   assert(baseline_count == 48);
@@ -59,13 +59,13 @@ int main() {
       assert(x.c.repetitions == o.config.repetitions && x.c.warmups == o.config.warmups);
       ++count;
     }
-    assert(count == 4800);
+    assert(count == 2400);
   }
   const char* smoke[] = {"test", "--preset", "smoke", "--qubits", "3"};
   assert(matrix(options(5, const_cast<char**>(smoke))).references.size() == 9);
   const char* single[] = {"test", "--positions", "7,1"};
   m = matrix(options(3, const_cast<char**>(single)));
-  assert(m.references.size() == 1 && m.cases.size() == 21);
+  assert(m.references.size() == 1 && m.cases.size() == 11);
   assert(m.references[0].positions == (std::vector<unsigned>{7,1}));
   for (const auto* key : {"--qubits", "--positions", "--sm-multiplier"}) {
     for (const auto* preset : {"full", "full-k1-6"}) {
@@ -85,6 +85,15 @@ int main() {
   assert(m.references.size() == 2 && m.cases.size() == 3);
   assert(m.cases[0].c.positions != m.cases[1].c.positions);
   assert(m.cases[2].segmented && m.cases[0].reference == m.cases[2].reference);
+  // Obsolete strategy values must fail parsing rather than generate launch cases.
+  for (const char* primitive : {"custom", "cub", "segmented"}) {
+    { std::ofstream f(path); f << "7,1 ordered " << primitive
+        << " global thread_major cooperative 128 2\n"; }
+    bool rejected = false;
+    try { matrix(options(3, const_cast<char**>(planned))); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    assert(rejected);
+  }
   std::remove(path.c_str());
   std::cout << "benchmark host matrix checks passed\n";
 }

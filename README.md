@@ -8,7 +8,7 @@ and a fixed-capacity register candidate. The six-step contract is in
 Step 6 adds the complete benchmark matrix, per-repetition event timing, full-input
 CPU validation, JSON/CSV output and separate profiling tools; see
 [benchmark commands, result definitions and execution evidence](docs/benchmark.md).
-Step 4 adds gated cooperative kernels. Step 5 adds matched CUB BlockReduce and
+Step 5 adds matched CUB BlockReduce and
 lazy-gather DeviceSegmentedReduce baselines; see [definitions, source audit and
 results](docs/cub-baselines.md).
 
@@ -42,7 +42,7 @@ Supported block sizes are **32, 64, 128, 256, 512, 1024**, validated explicitly.
 launch exactly `G = SM_count * sm_multiplier` blocks on the same stream. Each
 thread reads its grid-stride input elements once. Bin extraction uses the runtime
 ordered positions. Reductions use full-warp shuffles followed by shared scratch,
-with barriers before scratch reuse. The two-kernel reduction path uses no library reductions or atomics.
+with barriers before scratch reuse. The custom two-kernel reduction path uses no library reductions or atomics.
 
 For global storage, `T = G * block_size`, `B = 2^k`, reusable device workspace is:
 
@@ -152,57 +152,11 @@ cases include k=1,3,6,8, covering small storage, capacity boundary, opt-in candi
 and oversized requests on typical devices. Unsupported shared configurations
 are printed explicitly and skipped; supported runtime failures fail the suite.
 
-Step 4 adds `ReductionMethod::cooperative` as the optional fourth constructor
-argument to `GlobalReduction`; the default remains `two_kernel`. The driver
-reports both methods for each backend/layout. Cooperative kernels share the
-custom accumulation and block reduction routines with the two-kernel path,
-write all bin-major partials, call `cooperative_groups::this_grid().sync()` once,
-then finalize with `bin=blockIdx.x; bin<B; bin+=G`. Every thread reaches the grid
-collective, including idle input threads and blocks owning no final bins.
-Measurement count and ordered positions remain runtime inputs.
-
-Before allocation or launch, eligibility checks query cooperative device support,
-apply shared-memory opt-in to the actual combined kernel, query its attributes
-and occupancy with the requested block size and dynamic bytes, and calculate:
-
-- Requested blocks: `G = SM_count * sm_multiplier`.
-- Resident block limit: `R = SM_count * active_blocks_per_SM(combined kernel, S, dynamic_bytes)`.
-- Eligible residency: `G <= R`; oversized requests throw `Unsupported` on the host.
-
-Diagnostics print G, SM count, R, and the combined kernel's resource data.
-No grid/block adjustment or backend fallback is made. The enqueue path uses
-`cudaLaunchCooperativeKernel` with exactly G blocks and S threads. Register
-qualification is independent for the combined kernel and remains unverified;
-k=4..8 still exceeds its fixed capacity. The existing event timing and workspace
-ownership apply, with all cooperative reduction work in one launch.
-
-**All cooperative execution is currently disabled.** The specification retains
-its strict atomic policy with no synchronization exception. Inspection of
-NVIDIA CUDA runtime 12.9.79 shows atomic addition inside `grid.sync()`, conflicting
-with that policy. Other builds have no reviewed atomic-free synchronization
-certification. See [the synchronization audit](docs/cooperative-sync-audit.md)
-for package/header hashes, call path, source locations, and generated-code limits.
-`make cuda-evidence CUDA_ARCH=sm_XX` now also retains the preprocessed reduction
-source, including the selected vendor synchronization implementation. Evidence
-capture cannot enable execution. If a future build is certified, the driver
-compares each executable cooperative output with both the CPU reference and the
-matching successful two-kernel output before reporting success.
-
-Step 4 results in this environment (2026-10-31):
-
-| Combination | Support / observed result |
-| --- | --- |
-| Two-kernel global/shared, both layouts | Preserved; CUDA build/runtime unverified here |
-| Cooperative global/shared, both layouts, k=1..8 | Unsupported: strict synchronization audit gate; device limits may reject earlier |
-| Cooperative registers, k=1..3, layout n/a | Unsupported: combined residency unverified and synchronization policy gate |
-| Registers, either method, k=4..8 | Unsupported: eight-bin capacity |
-
-`make host` succeeds (library already current). `make cuda` stops because nvcc
-is unavailable. Tests and sanitizers were skipped at the user's request,
-including small-input, repeated-run, arbitrary-position and oversized-residency
-checks. No actual correctness results, numeric device eligibility calculations,
-PTX/SASS findings, or timings can be claimed for this step. No known-invalid
-cooperative launch was attempted and no full benchmark matrix was added.
+Custom and CUB BlockReduce reductions use two kernels exclusively. Each launches
+exactly the requested G blocks on the same stream; stream ordering makes the
+partials visible to the final stage. There is no grid-wide synchronization
+kernel or alternative reduction strategy. The strict atomic-accumulation
+prohibition and necessary block barriers remain in force.
 
 Step 5 uses `make cuda` with the installed toolkit's CCCL/CUB headers or headers
 selected through `CPPFLAGS`. There is no CUB version whitelist: versions including
@@ -215,7 +169,7 @@ selected build's atomic-free audit status is **unverified**. API compatibility,
 numerical validation and timing do not establish atomic-free execution. See
 [the CUB policy and historical source evidence](docs/cub-baselines.md).
 `BlockPrimitive::cub` selects matched BlockReduce kernels at S=32/64/128/256/512/1024,
-with independent resource inspection and register/cooperative gates.
+with independent resource inspection and a register residency gate.
 `SegmentedReduction` runs once with custom tuning fields n/a and signed 64-bit
 lazy gather and segment offsets, including the exclusive N=2^31 endpoint.
 
@@ -232,7 +186,7 @@ make benchmark-full BENCHMARK_ARGS='--block-sizes 256 --repetitions 1 --warmups 
 ```
 
 The default full preset sweeps measured-qubit counts k=1..16 at fixed q=31 and
-retains all 4848 requested cases, including unsupported ones. Results are written
+retains all 2448 requested cases, including unsupported ones. Results are written
 to `build/full.json` and `build/full.csv`. Use
 `make benchmark-smoke` for a separately labelled small-input sweep. See the
 [Step 6 guide](docs/benchmark.md) for validation, memory preflight, timing,
@@ -247,8 +201,14 @@ make benchmark-full-k1-6 BENCHMARK_ARGS='--block-sizes 256 --repetitions 1 --war
 ```
 
 This uses the `full-k1-6` preset with the same fixed q=31 input, position bands,
-methods, tuning parameters, timing and validation as `full`. It retains all 1818
+methods, tuning parameters, timing and validation as `full`. It retains all 918
 requested cases by default, including unsupported ones. Results go to the separate
 directory `build/full-k1-6/` as `results.json` and `results.csv`; override the prefix
-with `BENCHMARK_K1_6_RESULTS=path/to/results`. The original `benchmark-full` target
-and its k=1..16 sweep are unchanged.
+with `BENCHMARK_K1_6_RESULTS=path/to/results`. The `benchmark-full` target retains its k=1..16 sweep.
+
+Validation after removing the single-kernel synchronization variant (2026-11-02):
+`make` and `make test-host` pass, including both C++ host suites and nine Python
+tests. All four staged JSON plans generate successfully in dry-run mode.
+`make cuda`, `make test-cuda`, `make sanitize`, and `make cuda-evidence` are
+blocked by missing nvcc. CUDA compilation, GPU correctness, sanitizer checks,
+and device-code audits remain unverified; register timing remains disabled.

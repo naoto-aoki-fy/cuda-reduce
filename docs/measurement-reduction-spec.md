@@ -34,7 +34,7 @@ This contract applies across all six implementation steps. Step 1 provides only 
 
 The completed project will provide:
 
-- Independent custom reductions using either two reduction kernels or a cooperative kernel with `grid.sync()`.
+- Independent custom reductions using two reduction kernels ordered on the same stream.
 - Per-thread accumulator storage in registers, shared memory, or preallocated global memory.
 - Thread-major and bin-major layouts for shared and global storage.
 - Separate CUB BlockReduce and DeviceSegmentedReduce baselines.
@@ -47,9 +47,9 @@ No device-side atomic addition is permitted in the executed measurement/reductio
 
 This includes `atomicAdd`, atomic fetch-add wrappers, equivalent generated atomic-add instructions, and CAS-based emulation of atomic accumulation.
 
-Audit the selected CUB algorithms and the implementation of cooperative synchronization. Do not silently exempt library internals. If a required vendor implementation violates this policy, record the affected configuration as `unsupported` with evidence and an explicit reason.
+Audit the selected CUB algorithms. Do not silently exempt library internals. If a required vendor implementation violates this policy, record the affected configuration as `unsupported` with evidence and an explicit reason.
 
-Do not replace a required `grid.sync()` with a custom spin barrier to work around this restriction.
+Use same-stream kernel ordering between reduction stages; do not introduce a grid-wide synchronization mechanism.
 
 ### Launch and benchmark contract
 
@@ -98,7 +98,7 @@ validation once and reports GPU reductions as `not_run`.
 arithmetic before allocation. `launch_blocks` computes exactly SM_count times
 sm_multiplier and rejects a result beyond the CUDA grid-x limit (INT_MAX).
 Future launch sites must also check device-specific block and grid limits,
-shared memory limits, and cooperative residency, reporting unsupported requests
+shared memory limits, and per-kernel occupancy, reporting unsupported requests
 without changing the settings. `workspace_elements` promotes all three
 operands to the shared uint64_t size type and checks both products. For example,
 q=31 means 2147483648 elements and 34359738368 state bytes; these calculations
@@ -108,8 +108,8 @@ CUDA and cuRAND calls throw descriptive errors on failure. The move-only
 `DeviceBuffer` and scoped generator release owned resources during both normal
 return and exception unwinding. Destructors do not throw; cleanup return codes
 are ignored. Device synchronization at the end of generation checks asynchronous
-execution errors before the state is returned. There are no reduction kernels,
-reduction-library calls, or cooperative synchronization implementations in Step 1.
+execution errors before the state is returned. There are no reduction kernels
+or reduction-library calls in Step 1.
 The strict atomic audit must be completed for each selected reduction and
 synchronization implementation in later steps.
 
@@ -208,7 +208,7 @@ failures. Workspace construction errors throw; the driver classifies them.
 
 The reduction source uses no atomic operations, CUB, or device library reduction
 routines. Synchronization consists only of warp shuffles, block barriers and
-same-stream kernel ordering; no cooperative or spin barrier is present. Source
+same-stream kernel ordering. Source
 audit is complete; generated device code has not been audited without nvcc.
 
 `run` returns average CUDA-event milliseconds across requested repetitions, after
@@ -266,53 +266,15 @@ and global output, repeated reuse with changed input, constructor resource
 rejection with requested-byte diagnostics, and unverified/capacity register
 rejection. Representative sanitizer invocations use the existing sanitize target.
 Actual host/GPU results and the environment's support matrix are recorded in
-README. No cooperative launch or CUB implementation is part of Step 3.
-
-## Step 4: gated cooperative reduction
-
-`ReductionMethod::cooperative` selects one combined kernel per storage backend;
-global/shared layouts remain runtime choices. Two-kernel execution remains the
-default. Shared device routines implement initialization, 64-bit traversal,
-custom block partials and unique block-stride final bin ownership in both paths.
-The combined kernel performs one unconditional `this_grid().sync()` between
-partial writes and finalization, including threads/blocks without useful work.
-Its launch API is `cudaLaunchCooperativeKernel`, with exactly the requested
-`G=SM_count*sm_multiplier` blocks and supported block size.
-
-`reduction_resources(config, storage, method)` inspects the exact combined kernel
-for cooperative requests, checks device support and launch limits, applies
-shared-memory opt-in, and queries occupancy using its actual dynamic allocation.
-The maximum resident grid is `active_blocks_per_SM*SM_count`; G above that bound
-is rejected on the host. The resource result is an eligibility calculation, not
-an atomic-policy or register certification. Constructor gates run before device
-buffer allocation, and eligibility is rechecked before cooperative enqueue.
-Register qualification of the two-stage kernel never qualifies the combined
-kernel; each needs independent evidence.
-
-The strict atomic policy is unchanged. No synchronization-only exception is
-introduced. All cooperative constructors currently reject execution: examined
-vendor CUDA 12.9.79 synchronization uses atomic addition, and no build-bound
-atomic-free synchronization certification exists. The source inspection,
-package/header hashes and unavailable generated-code evidence are recorded in
-`docs/cooperative-sync-audit.md`. In-capacity register requests also remain
-unverified for the combined kernel; larger counts exceed capacity.
-
-The driver reports each method separately and contains CPU and matching
-two-kernel comparisons for executable cooperative outputs. Evidence capture
-retains the selected vendor preprocessing as well as PTX/SASS. Tests were
-explicitly skipped for Step 4; no runtime correctness or numerical residency
-results are claimed in the absence of CUDA tools/hardware. CUB and the complete
-benchmark matrix remain deferred.
-
+README. No CUB implementation is part of Step 3.
 
 ## Step 5: separate CUB baselines
 
 `BlockPrimitive::custom` remains the default and instantiates only the independent
 custom reduction primitive. `BlockPrimitive::cub` instantiates matched CUB kernels
 at S=32/64/128/256/512/1024, preserving runtime measurement count, positions, accumulator
-storage/layout and two-kernel/cooperative structure. Resource checks inspect the
-actual selected CUB kernels. Register residency and cooperative synchronization
-qualification remain independent gates.
+storage/layout and two-kernel structure. Resource checks inspect the
+actual selected CUB kernels. Register residency qualification remains an independent gate.
 
 `SegmentedReduction` executes `DeviceSegmentedReduce::Sum` on the original state
 through a signed 64-bit random-access gather/norm iterator and signed 64-bit

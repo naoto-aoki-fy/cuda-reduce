@@ -55,7 +55,7 @@ void check(Config c, bool segmented_only = false) {
       std::unique_ptr<GlobalReduction> reduction;
       try {
         reduction = std::make_unique<GlobalReduction>(c, layout, storage,
-          ReductionMethod::two_kernel, BlockPrimitive::cub);
+          BlockPrimitive::cub);
       } catch (const Unsupported& e) {
         std::cout << "CUB BlockReduce S=" << block << " storage=" << storage_name(storage)
                   << " layout=" << layout_name(layout) << " k=" << c.positions.size()
@@ -102,22 +102,13 @@ int main() {
       std::reverse(c.positions.begin(), c.positions.end());
       check(c, true);
     }
-    for (auto method : {ReductionMethod::two_kernel, ReductionMethod::cooperative})
     for (unsigned k : {1u, 3u, 4u, 8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u, 16u}) {
       Config c; c.qubits = 16; c.positions = contiguous_positions(16, k, "low");
       try {
         GlobalReduction rejected(c, GlobalLayout::thread_major, AccumulatorStorage::registers,
-          method, BlockPrimitive::cub);
+          BlockPrimitive::cub);
         throw std::runtime_error("CUB register evidence gate unexpectedly opened");
       } catch (const Unsupported& e) { std::cout << "CUB registers unsupported: " << e.what() << '\n'; }
-    }
-    for (auto storage : {AccumulatorStorage::global, AccumulatorStorage::shared}) {
-      Config c;
-      try {
-        GlobalReduction rejected(c, GlobalLayout::thread_major, storage,
-          ReductionMethod::cooperative, BlockPrimitive::cub);
-        throw std::runtime_error("CUB cooperative policy gate unexpectedly opened");
-      } catch (const Unsupported& e) { std::cout << "CUB cooperative unsupported: " << e.what() << '\n'; }
     }
     std::cout << "CUB baseline checks passed for executable configurations\n";
   } catch (const Unsupported& e) {
